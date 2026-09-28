@@ -1,7 +1,10 @@
-# AIBot —— 由大语言模型自主控制的 Minecraft AI 假玩家
+﻿# AIBot —— 由大语言模型自主控制的 Minecraft AI 假玩家
 
 一个 Fabric 模组：在 Minecraft 里加入一个由 LLM 驱动的假玩家。它能自主观察世界、规划任务、执行动作、
 与玩家对话，并在无人干预下**长期持续自主游玩**。**支持 Minecraft 1.20.1 / 1.21.1 / 1.21.11 / 26.3 四个版本。**
+
+> 本文件为 **UTF-8（带 BOM）** 编码。如果你在任何地方看到中文显示成 `???`，
+> 请用 UTF-8 打开本文件（见第 13 节）。
 
 ---
 
@@ -38,7 +41,7 @@
 
 ### A\* 寻路（`PathFinder`）
 
-真人走路会做四件事，A\* 全都支持：
+真人走路会做六件事，A\* 全都支持：
 
 | 动作 | 实现 | 代价 |
 |---|---|---|
@@ -47,9 +50,10 @@
 | 掉下去 | 落差 ≤ 4 格（避免摔伤） | 1.2 + 0.2×落差 |
 | 游泳 | 水中可通过 | 1.5+ |
 | **挖穿挡路方块** | 硬度 ≤ 3.0 才挖（可用开关关闭） | 4.0 |
-| **搭桥跨缺口** | 跨度 ≤ 3，需背包容有方块 | 6.0 + 跨度 |
+| **搭桥跨缺口** | 跨度 ≤ 3，需背包有方块 | 6.0 + 跨度 |
 
 技术要点：
+
 - 用原版 `level.noCollision(AABB)` 做真实碰撞判定，所以栅栏、半砖、台阶等形状都正确
 - 搜索上限 4000 节点，纯计算（不改世界），不会卡 tick
 - **卡住自恢复**：走路时连续多 tick 位移 < 0.02 格即判定被挡，自动重新规划（最多 5 次），
@@ -73,17 +77,13 @@
    原版内部是 `new ServerPlayer(...)`，重生后拿到的是**普通 ServerPlayer**。
    - `FakePlayerManager` 同时保存 `currentBot` 与 `plainBot`，用 `getPlayer()` 统一取；
    - `ActionExecutor` / `StateCollector` / `TickActionDriver` 参数类型都是 `ServerPlayer`。
-
 2. **动作是跨 tick 的，不是瞬间的。**
    `execute()` 返回 `async=true` 表示「已启动」，
    走远路可能几百 tick，挖黑曜石要 188 tick（9.4 秒，和真人一样）。
-
 3. **tick 事件必须用 `START_SERVER_TICK`。**
    移动输入（`zza`/`xxa`）是被**玩家自己的 tick** 消费的，
    放在 `END_SERVER_TICK` 会慢一拍且可能被原版重置。
-
 4. **重生保留物品栏**（`respawn(player, true)`）。
-
 5. **计划跨重启持久化**到 `config/aibot/plan.json`。
 
 ---
@@ -105,7 +105,6 @@
    因为 Loom 1.17.x 自身要求运行它的 JVM ≥ 21。
    「运行 Gradle 的 JDK」和「编译目标的 JDK」是两件不同的事情，
    前者由 `JAVA_HOME` 决定，后者由 `build.gradle` 里的 `java { toolchain { ... } }` 决定。
-
 2. **Gradle 只自动探测「当前 JVM 所在的那个 JDK」。**
    所以 1.20.1 模块必须在 `gradle.properties` 里登记 JDK 路径：
 
@@ -120,11 +119,11 @@
 
 任选一种方式，装 **JDK 17 / 21 / 25** 三个：
 
-* 国内镜像直接下载（推荐，避开 GitHub）：
-  * `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jdk/x64/windows/`
-  * `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/21/jdk/x64/windows/`
-  * `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/25/jdk/x64/windows/`
-* 或 `winget install EclipseAdoptium.Temurin.21.JDK`（此方式走 GitHub，网络可能不通）
+- 国内镜像直接下载（推荐，避开 GitHub）：
+  - `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jdk/x64/windows/`
+  - `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/21/jdk/x64/windows/`
+  - `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/25/jdk/x64/windows/`
+- 或 `winget install EclipseAdoptium.Temurin.21.JDK`（此方式走 GitHub，网络可能不通）
 
 ### Gradle 发行版下载慢/失败
 
@@ -139,7 +138,24 @@ networkTimeout=120000
 
 ---
 
-## 2. 打包（构建四个版本的 jar）
+## 2. 快速开始（直接用现成 jar）
+
+不想自己编译的话，直接下载发布版：
+
+**https://github.com/Zxin-Pro/aibot-fabric/releases**
+
+| Minecraft | 下载文件 |
+|---|---|
+| 1.20.1 | `aibot-0.4.0-1.20.1.jar` |
+| 1.21.1 | `aibot-0.4.0-1.21.1.jar` |
+| 1.21.11 | `aibot-0.4.0-1.21.11.jar` |
+| 26.3 | `aibot-0.4.0-26.3.jar` |
+
+装法见第 3 节，配置见第 4 节。
+
+---
+
+## 3. 打包（自己构建四个版本的 jar）
 
 ### 方式一：一键脚本（推荐）
 
@@ -188,41 +204,41 @@ gradlew.bat build --no-daemon
 
 ### 产物位置
 
-每个模块构建后产出：
+每个模块构建后产出（版本号以实际为准，当前为 `0.4.0`）：
 
 ```
-fab-<版本>/build/libs/aibot-0.1.0.jar           <- 装进 mods 的就是这个
-fab-<版本>/build/libs/aibot-0.1.0-sources.jar   <- 源码包，不用装
+fab-<版本>/build/libs/aibot-<版本号>.jar           <- 装进 mods 的就是这个
+fab-<版本>/build/libs/aibot-<版本号>-sources.jar   <- 源码包，不用装
 ```
 
 **选对 jar**：给 1.20.1 用 `fab-1.20.1` 的产物，给 26.3 用 `fab-26.3` 的产物，不能混用。
 
 ---
 
-## 3. 安装
+## 4. 安装
 
 1. 安装对应版本的 **Fabric Loader**（26.3 需 ≥ 0.19.5）。
 2. 把 **Fabric API** 放进 `mods/`：
-   * 1.20.1 → 0.92.11+1.20.1
-   * 1.21.1 → 0.116.17+1.21.1
-   * 1.21.11 → 0.141.6+1.21.11
-   * 26.3 → 0.161.0+26.3
-3. 把 **对应版本构建出的 `aibot-0.1.0.jar`** 放进 `mods/`。
+   - 1.20.1 → 0.92.11+1.20.1
+   - 1.21.1 → 0.116.17+1.21.1
+   - 1.21.11 → 0.141.6+1.21.11
+   - 26.3 → 0.161.0+26.3
+3. 把 **对应版本的 `aibot-<版本号>.jar`** 放进 `mods/`。
 4. 启动游戏 / 服务器。
 
 mods 目录位置：
 
-* 客户端：`%APPDATA%\.minecraft\mods`（Windows）
-* 服务端：服务器根目录下的 `mods/`
+- 客户端：`%APPDATA%\.minecraft\mods`（Windows）
+- 服务端：服务器根目录下的 `mods/`
 
 ---
 
-## 4. 配置 LLM
+## 5. 配置 LLM
 
 启动一次后，配置文件会自动生成在：
 
-* 单人：`.minecraft/saves/<存档名>/config/aibot/config.json`
-* 服务端：服务器根目录 `config/aibot/config.json`
+- 单人：`.minecraft/saves/<存档名>/config/aibot/config.json`
+- 服务端：服务器根目录 `config/aibot/config.json`
 
 **API Key 不硬编码**，只存在这个文件里。可以直接编辑文件，也可以用命令改：
 
@@ -259,7 +275,7 @@ mods 目录位置：
 
 ---
 
-## 5. 使用 / 命令
+## 6. 使用 / 命令
 
 所有命令需要 **OP 权限（等级 2）**。
 
@@ -305,7 +321,7 @@ mods 目录位置：
 
 ---
 
-## 6. 缓存命中优化（核心性能指标）
+## 7. 缓存命中优化（核心性能指标）
 
 LLM 调用按「**静态前缀 + 动态后缀**」严格分层，目标是缓存命中率 **> 80%**。
 
@@ -321,11 +337,11 @@ LLM 调用按「**静态前缀 + 动态后缀**」严格分层，目标是缓存
 
 ### 保证前缀稳定的纪律
 
-* 静态前缀里**禁止**出现时间戳、随机数、tick 数、坐标、玩家名、UUID。
-* 状态 JSON 的字段顺序手动固定拼接（**不用 Gson 序列化 HashMap**，遍历顺序不稳定）。
-* 坐标统一格式化为 1 位小数，避免浮点尾数抖动。
-* 方块/实体列表按「距离升序 + ID 字典序」排序，消除遍历顺序差异。
-* 动作 Schema 用字符串常量写死，不用 Set/Map 生成。
+- 静态前缀里**禁止**出现时间戳、随机数、tick 数、坐标、玩家名、UUID。
+- 状态 JSON 的字段顺序手动固定拼接（**不用 Gson 序列化 HashMap**，遍历顺序不稳定）。
+- 坐标统一格式化为 1 位小数，避免浮点尾数抖动。
+- 方块/实体列表按「距离升序 + ID 字典序」排序，消除遍历顺序差异。
+- 动作 Schema 用字符串常量写死，不用 Set/Map 生成。
 
 启动日志会打印**静态前缀指纹**：
 
@@ -344,8 +360,8 @@ LLM 调用按「**静态前缀 + 动态后缀**」严格分层，目标是缓存
 输出累计调用次数、缓存命中/未命中 token、命中率、估算节省与总花费。
 若命中率低于 50%，命令会直接列出排查清单。
 
-* **DeepSeek**：读取 `usage.prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
-* **OpenAI**：读取 `usage.prompt_tokens_details.cached_tokens`
+- **DeepSeek**：读取 `usage.prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+- **OpenAI**：读取 `usage.prompt_tokens_details.cached_tokens`
 
 每 100 次调用还会自动打一条命中率日志，便于长期观察。
 
@@ -353,9 +369,9 @@ LLM 调用按「**静态前缀 + 动态后缀**」严格分层，目标是缓存
 
 ---
 
-## 7. 测试步骤
+## 8. 测试步骤
 
-### 7.1 开发环境直接跑（不用装到正式游戏）
+### 8.1 开发环境直接跑（不用装到正式游戏）
 
 ```bat
 set "JAVA_HOME=C:\path\to\jdk-21"
@@ -366,7 +382,7 @@ gradlew.bat runClient
 首次会生成 `run/` 目录。测试服务端用 `gradlew.bat runServer`
 （首次需在 `run/eula.txt` 里把 `eula=false` 改成 `true`）。
 
-### 7.2 单人存档测试
+### 8.2 单人存档测试
 
 1. 按上面步骤装好 mod。
 2. 进存档，`/aibot config set apiKey ...` 配好密钥。
@@ -376,13 +392,34 @@ gradlew.bat runClient
 6. `/aibot auto on` —— 观察它每 2 秒决策一次，日志里有 `第 N 步 xxx -> 成功/失败`。
 7. `/aibot cache stats` —— 确认缓存命中率（跑 10+ 步后再看更有意义）。
 
-### 7.3 服务端测试
+### 8.3 重点验证 A\* 寻路
+
+```
+/aibot do {"action":"move","x":50,"y":64,"z":50}
+```
+
+**在它和目标之间故意放一堵墙**，看它表现为哪一种：
+
+- 绕过去（墙不够高、旁边能走）
+- 跳上去（墙高 1 格）
+- 挖穿（墙硬度 ≤ 3.0，如石头、泥土）
+- 搭桥（中途有沟壑且背包有方块）
+
+如果它顶着墙不动，把日志发出来——这就是寻路没生效。
+
+另外测挖矿是否**按硬度耗时**、工具是否**掉耐久**：
+
+```
+/aibot do {"action":"mine","block":"minecraft:stone"}
+```
+
+### 8.4 服务端测试
 
 1. 服务端装 Fabric + Fabric API + 本 mod，启动。
 2. 用 OP 账号进服，执行上面同样的命令。
 3. 假玩家会正常入服，其他玩家也能看到它、能和它说话。
 
-### 7.4 验证缓存是否真的生效
+### 8.5 验证缓存是否真的生效
 
 ```bat
 gradlew.bat runClient --info
@@ -394,7 +431,7 @@ gradlew.bat runClient --info
 
 ---
 
-## 8. 常见错误与解决
+## 9. 常见错误与解决
 
 | 报错 | 原因 | 解决 |
 |---|---|---|
@@ -414,26 +451,26 @@ gradlew.bat runClient --info
 
 ---
 
-## 9. 安全与合规（务必阅读）
+## 10. 安全与合规（务必阅读）
 
-* **备份存档**：假玩家会自动挖方块、移动、改世界。长期挂机前**务必备份存档**。
+- **备份存档**：假玩家会自动挖方块、移动、改世界。长期挂机前**务必备份存档**。
   （模组启动时也会在日志里提醒你。）
-* **API Key 安全**：密钥只存在 `config/aibot/config.json`，不硬编码在代码里。
+- **API Key 安全**：密钥只存在 `config/aibot/config.json`，不硬编码在代码里。
   `/aibot config show` 与 `/aibot status` 都会对密钥脱敏显示。
-* **多人服务器**：让模组控制假玩家在他人服务器上活动**可能违反服务器规则**，
+- **多人服务器**：让模组控制假玩家在他人服务器上活动**可能违反服务器规则**，
   也可能被视为作弊。**请只在单人存档或自己的服务器上使用。**
-* **遵守 Minecraft EULA**：本项目仅供学习与个人使用。
-* **成本控制**：`maxStepsPerSession` 默认 200 步会限制单次会话的 token 消耗；
-  先用 `/aibot cache stats` 观察花费再放开。
+- **遵守 Minecraft EULA**：本项目仅供学习与个人使用。
+- **成本控制**：`maxStepsPerSession` 默认 `0`（无限），token 会持续消耗。
+  先用 `/aibot cache stats` 观察花费，再决定要不要设上限。
 
 ---
 
-## 10. 项目结构
+## 11. 项目结构
 
 ```
 aibot-fabric/
 ├── build-all.bat                    一键构建四版本
-├── README.md                        本文件
+├── README.md                        本文件（UTF-8 with BOM）
 ├── fab-1.20.1/                      1.20.1 模块（Java 17，Loom remap）
 ├── fab-1.21.1/                      1.21.1 模块（Java 21）
 ├── fab-1.21.11/                     1.21.11 模块（Java 21）
@@ -455,7 +492,8 @@ src/main/java/com/example/aibot/
 │   └── CacheStats.java              缓存命中统计与费用估算
 ├── memory/
 │   ├── ShortTermMemory.java         短期记忆（最近 20 条，固定格式）
-│   └── LongTermMemory.java          长期记忆（memory.json 持久化）
+│   ├── LongTermMemory.java          长期记忆（memory.json 持久化）
+│   └── LandmarkMemory.java          地标记忆（家 / 箱子 / 矿点）
 ├── state/
 │   └── StateCollector.java          状态采集 → 固定字段顺序 JSON
 ├── action/
@@ -467,14 +505,15 @@ src/main/java/com/example/aibot/
 │   ├── AIBotPlayer.java             假玩家实体（版本差异集中处）
 │   └── FakePlayerManager.java       生成/移除/聊天
 ├── core/
-│   └── AutoLoop.java                自主循环状态机
+│   ├── AutoLoop.java                自主循环状态机
+│   └── TaskPlan.java                结构化任务计划（任务栈 + 持久化）
 └── command/
     └── AIBotCommand.java            /aibot 命令树
 ```
 
 ---
 
-## 11. 四个版本的关键差异（移植备忘）
+## 12. 四个版本的关键差异（移植备忘）
 
 | 差异点 | 1.20.1 | 1.21.1 | 1.21.11 | 26.3 |
 |---|---|---|---|---|
@@ -511,18 +550,46 @@ src/main/java/com/example/aibot/
 
 ---
 
-## 12. 已知限制 / 后续可做
+## 13. 中文显示成问号（???）怎么解决
 
-* **寻路是 A\*，但不是 Baritone**：能绕障、跳台阶、下落、游泳、挖穿、搭桥，
+本文件是 **UTF-8**。如果显示成 `???`，是**打开它的程序**用了错误的编码（通常是简体中文
+Windows 的默认 ANSI 代码页 **936 / GBK**），不是文件坏了。
+
+先确认文件本身完好：
+
+```bat
+git show HEAD:README.md | more
+```
+
+如果这里中文正常，那文件没问题，按下面处理：
+
+| 场景 | 解决 |
+|---|---|
+| **记事本（Notepad）** | 另存为时编码选 **UTF-8**；或直接用 VS Code 打开 |
+| **VS Code** | 右下角点编码 → **Reopen with Encoding** → **UTF-8** |
+| **Windows 终端 / CMD** | 先执行 `chcp 65001` 切到 UTF-8，再看输出 |
+| **浏览器看 GitHub 页面** | 强制刷新 `Ctrl+F5`；仍乱码则是代理/CDN 改写，用 raw 直链：`https://raw.githubusercontent.com/Zxin-Pro/aibot-fabric/main/README.md` |
+| **PowerShell 读文件** | 用 `Get-Content README.md -Encoding UTF8`，**不要**用默认读取 |
+
+> 本次已把文件重写为 **UTF-8 带 BOM**，目的是让那些「靠猜编码」的编辑器
+> 也能正确识别为 UTF-8。BOM 对 Markdown 渲染没有副作用。
+
+---
+
+## 14. 已知限制 / 后续可做
+
+- **寻路是 A\*，但不是 Baritone**：能绕障、跳台阶、下落、游泳、挖穿、搭桥，
   也有卡住重新规划。相比 Baritone 仍缺：跨维度寻路、矿洞复杂立体的长距离规划、
   更省的代价函数（当前是曼哈顿距离 + 垂直惩罚）。
   搜索上限 4000 节点，超过 100 格以上的复杂地形可能规划失败（会明确报错，不会静默卡住）。
-* **合成不等同于真人开界面**：假玩家没有客户端 GUI，合成是在服务端按真实配方规则结算
-  （材料必须齐全、产物按配方给）。结果与真人一致，但它不会"打开合成台"。
-* **不会主动加载区块**：没有客户端，所在区块若无其他玩家加载，
+- **合成不等同于真人开界面**：假玩家没有客户端 GUI，合成是在服务端按真实配方规则结算
+  （材料必须齐全、产物按配方给）。结果与真人一致，但它不会「打开合成台」。
+- **不会主动加载区块**：没有客户端，所在区块若无其他玩家加载，
   状态加载会跳过（已做 `isLoaded` 防护）。
-* **假玩家同时只允许一个**（`FakePlayerManager` 单实例）。
-* **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 普通 `ServerPlayer`，
+- **假玩家同时只允许一个**（`FakePlayerManager` 单实例）。
+- **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 普通 `ServerPlayer`，
   功能不受影响（所有执行器都按 `ServerPlayer` 编写）。
-* **LLM 输出解析**：已做三重容错；若模型频繁输出非 JSON，
+- **LLM 输出解析**：已做三重容错；若模型频繁输出非 JSON，
   建议强化 `StaticPrefix` 里的格式约束（注意保持前缀稳定以免掉缓存命中率）。
+- **仅编译期验证过**：寻路与真人机制的运行时行为**尚未实机测试**，
+  请按第 8.3 节自行验证。
