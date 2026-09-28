@@ -21,34 +21,40 @@
 假玩家不是在「作弊改世界」，而是通过**原版玩家输入通道**驱动，
 服务端看到的行为与真人客户端完全一致：
 
-| 行为 | 真人玩家 | 本模组（v0.3.0 起） | 之前的作弊实现（已废弃） |
+| 行为 | 真人玩家 | 本模组 | 之前的作弊实现（已废弃） |
 |---|---|---|---|
 | 走路 | 按 W，逐 tick 移动 | 设置 `zza`/`xxa`，由原版 `travel()` 推进 | ❌ `teleportTo` 瞬移 |
 | 重力/碰撞 | 有 | **有**（原版物理） | ❌ 无，可穿墙 |
-| 上台阶 | 按空格跳 | `setJumping(true)`（检测前方阻挡时） | ❌ 直接飞过去 |
+| **绕障碍** | **绕开 / 跳上去 / 挖开 / 搭桥** | **A\* 寻路**（见下） | ❌ 直线顶墙到超时 |
 | 挖方块 | 按住左键，按硬度耗时 | `gameMode.handleBlockBreakAction(...)` | ❌ `destroyBlock` 瞬间破坏 |
-| 工具耐久 | 消耗 | **消耗** | ❌ 不消耗 |
-| 挖矿速度 | 受工具/效率附魔影响 | **受影响** | ❌ 恒定瞬间 |
+| 工具选择 | 换最合适的工具 | `selectBestToolFor()` 按 `getDestroySpeed` 选 | ❌ 从不换工具 |
+| 工具耐久 | 消耗 | **消耗**（`isToolAboutToBreak()` 可感知） | ❌ 不消耗 |
 | 放方块 | 右键，走放置校验 | `gameMode.useItemOn(...)` | ❌ `setBlockAndUpdate` 凭空放 |
 | 吃东西 | 1.6 秒，会被打断 | `startUsingItem(...)`，**原版 tick 结算** | ❌ `food.eat()` 瞬间结算 |
 | 攻击 | 等冷却条 | 检查 `getAttackStrengthScale` | ❌ 无视冷却 |
-| 挖坏动画 | 有 | **有**（发真实的破坏包序列） | ❌ 无 |
+| **捡掉落物** | **走过去捡** | `tryPickupNearby()` 走向掉落物 | ❌ 直接进背包 |
+| **躲避危险** | **本能躲开岩浆/火** | `avoidDanger()` 反射 | ❌ 站着被烧 |
+| **被打就反应** | **掉血立刻跑** | 每 tick 比较血量差，掉血即撤离 | ❌ 挨打不管 |
 
-### 实现方式
+### A\* 寻路（`PathFinder`）
 
-关键类是 `TickActionDriver`，它每 tick 推进一次「当前动作」：
+真人走路会做四件事，A\* 全都支持：
 
-```
-START_SERVER_TICK  →  TickActionDriver.tick()  →  设置输入 / 发包
-                                                  ↓
-                                      原版玩家实体 tick 消费输入
-                                      （移动、挖矿进度、进食计时）
-```
+| 动作 | 实现 | 代价 |
+|---|---|---|
+| 平地走 | 相邻格可站立 | 1.0 |
+| 跳上 1 格台阶 | 检测上方可通行 | 1.5 |
+| 掉下去 | 落差 ≤ 4 格（避免摔伤） | 1.2 + 0.2×落差 |
+| 游泳 | 水中可通过 | 1.5+ |
+| **挖穿挡路方块** | 硬度 ≤ 3.0 才挖（可用开关关闭） | 4.0 |
+| **搭桥跨缺口** | 跨度 ≤ 3，需背包容有方块 | 6.0 + 跨度 |
 
-**为什么必须用 `START_SERVER_TICK`**：走路靠设置 `zza`（等价于按住 W），
-这些输入会被**玩家自己的 tick** 消费。真人客户端的按键包也是在 tick 之前
-到达服务端的。若放在 `END_SERVER_TICK` 里设置，输入要等到下一 tick 才生效，
-等于慢一拍，还可能被原版重置。
+技术要点：
+- 用原版 `level.noCollision(AABB)` 做真实碰撞判定，所以栅栏、半砖、台阶等形状都正确
+- 搜索上限 4000 节点，纯计算（不改世界），不会卡 tick
+- **卡住自恢复**：走路时连续多 tick 位移 < 0.02 格即判定被挡，自动重新规划（最多 5 次），
+  5 次仍失败才报错——这就是真人「走不通就换条路」的行为
+- `hasLineOfSight()` 提供视线检查，避免「透视」感知
 
 ### 长期自主运行的三项保障
 
@@ -58,25 +64,27 @@ START_SERVER_TICK  →  TickActionDriver.tick()  →  设置输入 / 发包
 | 跑 200 步就停 | **移除步数上限**（默认 0 = 无限） | `AIConfig.maxStepsPerSession` |
 | 反复横跳做不成事 | **结构化任务计划**（任务栈） | `TaskPlan` |
 | 走远就找不到家 | **地标记忆**，提示词带相对距离 | `LandmarkMemory` |
-| LLM 失误导致猝死 | **生存反射**，绕过 LLM 强制执行自保 | `AutoLoop.runSurvivalReflex()` |
-| 卡在死路上空转 | 任务连续失败自动跳过 | `TaskPlan.failCurrent()` |
+| LLM 失误导致猝死 | **生存反射**（受伤/低血/饥饿/危险方块） | `AutoLoop.runSurvivalReflex()`、`TickActionDriver.avoidDanger()` |
+| 卡在死路上空转 | 任务连续失败自动跳过 + 重新寻路 | `TaskPlan.failCurrent()`、`MAX_REPLANS` |
 
 ### 关键实现细节（踩坑记录）
 
 1. **`PlayerList.respawn()` 会丢弃我们的子类。**
-   原版内部是 `new ServerPlayer(...)`，重生后拿到的是**普通 ServerPlayer**，
-   不是 `AIBotPlayer`。因此：
+   原版内部是 `new ServerPlayer(...)`，重生后拿到的是**普通 ServerPlayer**。
    - `FakePlayerManager` 同时保存 `currentBot` 与 `plainBot`，用 `getPlayer()` 统一取；
-   - `ActionExecutor` / `StateCollector` / `TickActionDriver` 的参数类型都是 `ServerPlayer`。
+   - `ActionExecutor` / `StateCollector` / `TickActionDriver` 参数类型都是 `ServerPlayer`。
 
 2. **动作是跨 tick 的，不是瞬间的。**
-   `ActionExecutor.execute()` 返回 `async=true` 表示「已启动」，
-   真正结果由 `AutoLoop.tickActiveAction()` 在动作结束时统一记录。
+   `execute()` 返回 `async=true` 表示「已启动」，
    走远路可能几百 tick，挖黑曜石要 188 tick（9.4 秒，和真人一样）。
 
-3. **重生保留物品栏**（`respawn(player, true)`），否则一死资源全丢。
+3. **tick 事件必须用 `START_SERVER_TICK`。**
+   移动输入（`zza`/`xxa`）是被**玩家自己的 tick** 消费的，
+   放在 `END_SERVER_TICK` 会慢一拍且可能被原版重置。
 
-4. **计划跨重启持久化**到 `config/aibot/plan.json`。
+4. **重生保留物品栏**（`respawn(player, true)`）。
+
+5. **计划跨重启持久化**到 `config/aibot/plan.json`。
 
 ---
 
@@ -452,7 +460,9 @@ src/main/java/com/example/aibot/
 │   └── StateCollector.java          状态采集 → 固定字段顺序 JSON
 ├── action/
 │   ├── ActionParser.java            LLM 输出容错解析
-│   └── ActionExecutor.java          动作执行（14 种动作）
+│   ├── ActionExecutor.java          动作分发与参数校验
+│   ├── PathFinder.java              A* 寻路（绕障/跳台阶/挖穿/搭桥/视线检查）
+│   └── TickActionDriver.java        逐 tick 动作驱动（走路/挖掘/放置/进食/攻击/拾取）
 ├── entity/
 │   ├── AIBotPlayer.java             假玩家实体（版本差异集中处）
 │   └── FakePlayerManager.java       生成/移除/聊天
@@ -486,10 +496,11 @@ src/main/java/com/example/aibot/
 | **配方产物** | `getResultItem(RegistryAccess)` | `getResultItem(HolderLookup.Provider)` | **`display().result().resolveForFirstStack(...)`** | 同左 |
 | **配方材料** | `getIngredients()` | `getIngredients()` | **`placementInfo().ingredients()`** | 同左 |
 | **配方容器** | 直接 `Recipe<?>` | `RecipeHolder<?>` | `RecipeHolder<?>` | `RecipeHolder<?>` |
-| **掉落物品** | `drop(stack, false)` | 同左 | 同左 | **`drop(stack, false, Prediction)`** |
-| **挥手动画** | `swing(hand)` | `swing(hand)` | `swing(hand)` | **`swing(hand, SwingAnimation, boolean)`** |
+| **Drop 物品** | `drop(stack, false)` | 同左 | 同左 | **`drop(stack, false, Prediction)`** |
+| **挥手动画** | `swing(hand)` | `swing(hand)` | `swing(hand, boolean)` | **`swing(hand, SwingAnimation, boolean)`** |
 | **睡觉** | `startSleepInBed(pos)` | 同左 | 同左 | **`startSleepInBed(bedBlock, state, BedRule, pos)`** |
 | **手持槽位** | `Inventory.selected` 字段 | `Inventory.selected` 字段 | `setSelectedSlot()` / `getSelectedItem()` | 同左 |
+| **建世界高度** | `getMinBuildHeight()` | `getMinBuildHeight()` | `getMinY()` / `getMaxY()` | `getMinY()` / `getMaxY()` |
 | 服务器目录 | `getServerDirectory()` 返回 `File` | 返回 `Path` | 返回 `Path` | 返回 `Path` |
 | 映射 | mojmap | mojmap | mojmap | **无映射（26.1+ 不再混淆）** |
 | Loom 插件 | `fabric-loom-remap` | `fabric-loom-remap` | `fabric-loom-remap` | **`fabric-loom`** |
@@ -502,15 +513,16 @@ src/main/java/com/example/aibot/
 
 ## 12. 已知限制 / 后续可做
 
-* **寻路是「直线走 + 卡住即失败」**：走路已经是真实物理（有重力、碰撞、会跳台阶），
-  但**不会绕路** —— 遇到墙会一直顶着直到超时。要做真正的绕障寻路需要接入 Baritone 或
-  自行实现 A*。这是目前唯一还算「不像真人」的地方：真人会绕开障碍。
-* **合成不等同于真人开界面**：假玩家没有客户端 GUI，合成是在服务端按真实配方规则结算的
-  （材料必须齐全、产物按配方给）。对结果而言与真人一致，但它不会"打开合成台"。
+* **寻路是 A\*，但不是 Baritone**：能绕障、跳台阶、下落、游泳、挖穿、搭桥，
+  也有卡住重新规划。相比 Baritone 仍缺：跨维度寻路、矿洞复杂立体的长距离规划、
+  更省的代价函数（当前是曼哈顿距离 + 垂直惩罚）。
+  搜索上限 4000 节点，超过 100 格以上的复杂地形可能规划失败（会明确报错，不会静默卡住）。
+* **合成不等同于真人开界面**：假玩家没有客户端 GUI，合成是在服务端按真实配方规则结算
+  （材料必须齐全、产物按配方给）。结果与真人一致，但它不会"打开合成台"。
+* **不会主动加载区块**：没有客户端，所在区块若无其他玩家加载，
+  状态加载会跳过（已做 `isLoaded` 防护）。
 * **假玩家同时只允许一个**（`FakePlayerManager` 单实例）。
 * **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 普通 `ServerPlayer`，
   功能不受影响（所有执行器都按 `ServerPlayer` 编写）。
-* **不会主动加载区块**：没有客户端，所在区块若无其他玩家加载，
-  状态采集会跳过未加载方块（已做 `isLoaded` 防护）。
 * **LLM 输出解析**：已做三重容错；若模型频繁输出非 JSON，
   建议强化 `StaticPrefix` 里的格式约束（注意保持前缀稳定以免掉缓存命中率）。

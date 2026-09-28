@@ -108,6 +108,20 @@ public final class TickActionDriver {
 
     // 走路的参数
     private Vec3 walkTarget = null;
+    /** A* 算出的路径（按顺序经过的格子）。 */
+    private java.util.List<PathFinder.Step> path = null;
+    /** 当前走到第几个路径点。 */
+    private int pathIndex = 0;
+    /** 已重新规划次数（防止无限重算烧 CPU）。 */
+    private int replans = 0;
+    /** 上次重新规划发生在第几 tick。 */
+    private int lastReplanTick = 0;
+    /** 寻路器：允许挖穿挡路方块与搭桥，像真人一样自己开路。 */
+    private PathFinder pathFinder = null;
+    /** 路径中途需要挖的方块。 */
+    private BlockPos pendingDig = null;
+    /** 路径中途需要搭的方块位置。 */
+    private BlockPos pendingPlace = null;
 
     // 挖掘的参数
     private BlockPos mineTarget = null;
@@ -295,6 +309,12 @@ public final class TickActionDriver {
         }
 
         try {
+            // 危险规避优先级最高：站在岩浆旁边时先离开，什么动作都往后放
+            // （这是真人的本能，不该等 LLM 判断）
+            if (kind != Kind.EAT && avoidDanger()) {
+                return;
+            }
+
             switch (kind) {
                 case WALK -> tickWalk();
                 case MINE -> tickMine();
@@ -315,6 +335,13 @@ public final class TickActionDriver {
     // 走路：用原版输入驱动
     // ------------------------------------------------------------------
 
+    /**
+     * 走路：先 A* 算路，再沿路径点逐个走过去。
+     *
+     * <p>这是「像真人一样」的核心之一：真人遇到墙会绕，
+     * 这里通过 {@link PathFinder} 得到绕行路径；
+     * 路径上需要挖穿的方块会挖掉，需要搭桥的地方会垫方块。</p>
+     */
     private void tickWalk() {
         if (walkTarget == null) {
             fail("没有行走目标");
@@ -333,12 +360,49 @@ public final class TickActionDriver {
         if (horizontal < ARRIVE_H_DISTANCE && Math.abs(dy) < ARRIVE_V_TOLERANCE) {
             clearMovementInput();
             succeed("已走到 (" + fmt(walkTarget.x) + ", " + fmt(walkTarget.y) + ", "
-                    + fmt(walkTarget.z) + ")，用时 " + elapsedTicks + " tick");
+                    + fmt(walkTarget.z) + ")，用时 " + elapsedTicks + " tick"
+                    + (replans > 0 ? "（重新规划 " + replans + " 次）" : ""));
             return;
         }
 
-        // 转向目标（真人也是先转头再走）
-        float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+        // ---- 1. 首次进入或路径已走完 → 规划路径 ----
+        if (path == null || pathIndex >= path.size()) {
+            if (!planPath(level)) {
+                return; // 规划失败时 planPath 内部已给出结论
+            }
+        }
+
+        // ---- 2. 处理路径上的挖/搭 ----
+        if (pendingDig != null) {
+            if (!handlePathDig(level)) {
+                return; // 还在挖
+            }
+        }
+        if (pendingPlace != null && !handlePathPlace(level)) {
+            return; // 还在搭
+        }
+
+        // ---- 3. 朝当前路径点走 ----
+        PathFinder.Step step = path.get(pathIndex);
+        Vec3 waypoint = new Vec3(step.pos.getX() + 0.5, step.pos.getY(), step.pos.getZ() + 0.5);
+        double wdx = waypoint.x - pos.x;
+        double wdz = waypoint.z - pos.z;
+        double wdist = Math.sqrt(wdx * wdx + wdz * wdz);
+
+        // 到达当前路径点 → 前进到下一个
+        if (wdist < 0.7 && Math.abs(waypoint.y - pos.y) < 1.6) {
+            pathIndex++;
+            // 取出下一个路径点附带的挖/搭需求
+            if (pathIndex < path.size()) {
+                PathFinder.Step next = path.get(pathIndex);
+                pendingDig = next.digPos;
+                pendingPlace = next.placePos;
+            }
+            return;
+        }
+
+        // 转向当前路径点（真人也是先转头再走）
+        float yaw = (float) (Math.toDegrees(Math.atan2(wdz, wdx)) - 90.0);
         bot.setYRot(yaw);
         bot.yRotO = yaw;
         bot.setYHeadRot(yaw);
@@ -347,22 +411,343 @@ public final class TickActionDriver {
         bot.zza = MOVE_FORWARD;
         bot.xxa = 0.0f;
 
-        // 前方有障碍或需要上台阶时跳跃（真人手动按空格）
-        if (shouldJump(level)) {
-            bot.setJumping(true);
-        } else {
-            bot.setJumping(false);
+        // 需要上台阶/跳上路径点时按空格（真人手动跳）
+        boolean needJump = step.jump
+                || shouldJumpToward(level, waypoint)
+                || (Math.abs(waypoint.y - pos.y) > 0.6 && bot.onGround());
+        bot.setJumping(needJump);
+
+        // 卡住检测：连续多 tick 几乎没动 → 重新规划
+        if (elapsedTicks > 20 && isStuckInPlace()) {
+            if (replans >= MAX_REPLANS) {
+                clearMovementInput();
+                fail("反复被卡住（已重新规划 " + replans + " 次），无法到达 "
+                        + "(" + fmt(walkTarget.x) + ", " + fmt(walkTarget.y) + ", " + fmt(walkTarget.z) + ")");
+                return;
+            }
+            replans++;
+            lastReplanTick = elapsedTicks;
+            path = null;
+            pathIndex = 0;
+            pendingDig = null;
+            pendingPlace = null;
+            lastPos = null;
+            LOGGER.info("[AIBot] 走路卡住，第 " + replans + " 次重新规划路径");
+        }
+    }
+
+    /** 最多重新规划几次。 */
+    private static final int MAX_REPLANS = 5;
+
+    /**
+     * 规划路径。
+     *
+     * @return true 表示成功拿到路径（或已判定无需走）
+     */
+    private boolean planPath(ServerLevel level) {
+        BlockPos start = bot.blockPosition();
+        BlockPos goal = BlockPos.containing(walkTarget.x, walkTarget.y, walkTarget.z);
+
+        // 允许挖穿与搭桥：像真人一样自己开路
+        if (pathFinder == null) {
+            pathFinder = new PathFinder(true, true, bridgeBlockOf(level));
         }
 
-        // 卡住检测：连续多 tick 位移极小，说明被挡住了
-        if (elapsedTicks > 40 && isStuckInPlace()) {
+        java.util.List<PathFinder.Step> found = pathFinder.findPath(level, start, goal);
+
+        if (found.isEmpty()) {
+            // 目标就在脚下
+            if (start.equals(goal) || Math.abs(start.getY() - goal.getY()) <= 1
+                    && start.getX() == goal.getX() && start.getZ() == goal.getZ()) {
+                clearMovementInput();
+                succeed("已在目标位置");
+                return false;
+            }
             clearMovementInput();
-            fail("被障碍挡住，无法继续前进（可尝试绕行或先挖开）");
+            // 给出更有用的失败原因
+            if (!level.isLoaded(goal)) {
+                fail("目标位置所在区块未加载，无法寻路");
+            } else {
+                fail("寻路失败：附近没有可到达的路径（目标可能被封死或超出搜索范围 "
+                        + "(" + PathFinder.class.getSimpleName() + " 上限 4000 节点)）");
+            }
+            return false;
         }
+
+        this.path = found;
+        this.pathIndex = 0;
+        // 第一个路径点的挖/搭需求
+        PathFinder.Step first = found.get(0);
+        this.pendingDig = first.digPos;
+        this.pendingPlace = first.placePos;
+        LOGGER.fine("[AIBot] 寻路成功：" + found.size() + " 步");
+        return true;
+    }
+
+    /**
+     * 处理路径上的挖掘需求。
+     *
+     * @return true 表示挖完了（可以继续走）
+     */
+    private boolean handlePathDig(ServerLevel level) {
+        BlockPos target = pendingDig;
+        BlockState state = level.getBlockState(target);
+
+        // 已经挖掉了
+        if (state.isAir()) {
+            pendingDig = null;
+            clearMovementInput();
+            return true;
+        }
+
+        // 走过去挖（真人也是走到能挖到的距离）
+        double dist = Math.sqrt(bot.blockPosition().distSqr(target));
+        if (dist > 4.0) {
+            walkToward(target);
+            return false;
+        }
+
+        clearMovementInput();
+        lookAtBlock(target);
+        bot.swing(InteractionHand.MAIN_HAND);
+
+        // 走原版挖掘流程（会按硬度耗时）
+        bot.gameMode.handleBlockBreakAction(
+                target,
+                breakingStarted
+                        ? ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK
+                        : ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,
+                Direction.UP,
+                BLOCK_BREAK_LIGHT,
+                breakSeq++);
+        breakingStarted = true;
+        return false;
+    }
+
+    /**
+     * 处理路径上的搭桥需求。
+     *
+     * @return true 表示搭好了（可以继续走）
+     */
+    private boolean handlePathPlace(ServerLevel level) {
+        BlockPos target = pendingPlace;
+        BlockState state = level.getBlockState(target);
+
+        // 已经有方块了（可能被别的东西占了）
+        if (!state.isAir() && !state.canBeReplaced()) {
+            pendingPlace = null;
+            clearMovementInput();
+            return true;
+        }
+
+        // 找背包里的搭桥方块
+        int slot = findAnyPlaceableSlot();
+        if (slot < 0) {
+            clearMovementInput();
+            fail("需要搭桥但背包里没有可放置的方块");
+            return false;
+        }
+        if (slot < 9) {
+            bot.getInventory().selected = slot;
+        }
+
+        // 站近一点再放
+        double dist = Math.sqrt(bot.blockPosition().distSqr(target));
+        if (dist > 3.5) {
+            walkToward(target);
+            return false;
+        }
+
+        clearMovementInput();
+        lookAtBlock(target);
+
+        // 贴相邻方块放置
+        Direction face = Direction.UP;
+        BlockPos against = target.below();
+        if (level.getBlockState(against).isAir()) {
+            for (Direction d : Direction.values()) {
+                BlockPos side = target.relative(d);
+                if (!level.getBlockState(side).isAir()) {
+                    against = side;
+                    face = d.getOpposite();
+                    break;
+                }
+            }
+        }
+
+        Vec3 hitVec = new Vec3(against.getX() + 0.5, against.getY() + 0.5, against.getZ() + 0.5);
+        BlockHitResult hit = new BlockHitResult(hitVec, face, against, false);
+        ItemStack held = bot.getInventory().getSelected();
+        bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
+        bot.swing(InteractionHand.MAIN_HAND, true);
+
+        // 下一 tick 用实际方块状态判定是否成功
+        if (!level.getBlockState(target).isAir() && !level.getBlockState(target).canBeReplaced()) {
+            pendingPlace = null;
+            return true;
+        }
+        return false;
+    }
+
+    /** 找背包里任意一个可以当搭桥材料的方块。 */
+    private int findAnyPlaceableSlot() {
+        var inv = bot.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (s.getItem() instanceof net.minecraft.world.item.BlockItem) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 选一个适合搭桥的方块（优先用便宜的）。 */
+    private Block bridgeBlockOf(ServerLevel level) {
+        // 优先找常见建筑材料
+        Block[] prefer = {
+                net.minecraft.world.level.block.Blocks.COBBLESTONE,
+                net.minecraft.world.level.block.Blocks.DIRT,
+                net.minecraft.world.level.block.Blocks.OAK_PLANKS,
+                net.minecraft.world.level.block.Blocks.STONE,
+        };
+        var inv = bot.getInventory();
+        for (Block b : prefer) {
+            for (int i = 0; i < inv.getContainerSize(); i++) {
+                ItemStack s = inv.getItem(i);
+                if (!s.isEmpty() && s.getItem() instanceof net.minecraft.world.item.BlockItem bi
+                        && bi.getBlock() == b) {
+                    return b;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 判断朝某个坐标走时是否需要跳。
+     */
+    private boolean shouldJumpToward(ServerLevel level, Vec3 target) {
+        Vec3 pos = bot.position();
+        Vec3 dir = target.subtract(pos);
+        Vec3 flat = new Vec3(dir.x, 0, dir.z);
+        if (flat.lengthSqr() < 1.0E-4) {
+            return false;
+        }
+        Vec3 ahead = pos.add(flat.normalize().scale(0.6));
+        BlockPos front = BlockPos.containing(ahead.x, pos.y, ahead.z);
+        BlockState frontState = level.getBlockState(front);
+        BlockState frontUp = level.getBlockState(front.above());
+        boolean blocked = !frontState.isAir() && frontState.isSolidRender(bot.serverLevel(), front);
+        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender(bot.serverLevel(), front.above());
+        return blocked && canPass && bot.onGround();
     }
 
     /** 上一 tick 的位置，用于卡住检测。 */
     private Vec3 lastPos = null;
+
+    // ------------------------------------------------------------------
+    // 安全与辅助反射（真人的本能行为）
+    // ------------------------------------------------------------------
+
+    /**
+     * 危险规避：站在岩浆/火/仙人掌等危险方块旁时自动挪开。
+     *
+     * <p>真人会本能地避开这些，这里作为兜底反射，
+     * 不经过 LLM 直接执行，避免因为 LLM 超时或判断失误而烧死。</p>
+     *
+     * @return true 表示已经朝安全方向施加了移动输入
+     */
+    public boolean avoidDanger() {
+        ServerLevel level = bot.serverLevel();
+        BlockPos feet = bot.blockPosition();
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos p = feet.offset(dx, dy, dz);
+                    if (!level.isLoaded(p)) {
+                        continue;
+                    }
+                    if (!isDangerous(level.getBlockState(p))) {
+                        continue;
+                    }
+                    // 朝远离危险源的方向推一下（等价于真人往后退）
+                    Vec3 away = bot.position().subtract(
+                            new Vec3(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5));
+                    Vec3 flat = new Vec3(away.x, 0, away.z);
+                    if (flat.lengthSqr() < 1.0E-4) {
+                        flat = new Vec3(1, 0, 0);
+                    }
+                    flat = flat.normalize();
+                    float yaw = (float) (Math.toDegrees(Math.atan2(flat.z, flat.x)) - 90.0);
+                    bot.setYRot(yaw);
+                    bot.yRotO = yaw;
+                    bot.setYHeadRot(yaw);
+                    bot.zza = MOVE_FORWARD;
+                    bot.xxa = 0.0f;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 是否是危险方块（岩浆、火、仙人掌、岩浆块、营火、甜浆果丛）。 */
+    private boolean isDangerous(BlockState s) {
+        return s.is(net.minecraft.world.level.block.Blocks.LAVA)
+                || s.is(net.minecraft.world.level.block.Blocks.FIRE)
+                || s.is(net.minecraft.world.level.block.Blocks.SOUL_FIRE)
+                || s.is(net.minecraft.world.level.block.Blocks.CACTUS)
+                || s.is(net.minecraft.world.level.block.Blocks.MAGMA_BLOCK)
+                || s.is(net.minecraft.world.level.block.Blocks.CAMPFIRE)
+                || s.is(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH);
+    }
+
+    /**
+     * 主动去捡附近的掉落物。
+     *
+     * <p>真人挖完矿会走过去把掉落物捡起来。这里朝最近的掉落物走，
+     * 进入 1.2 格后由原版自动收入背包。</p>
+     *
+     * @return true 表示正在前往掉落物
+     */
+    public boolean tryPickupNearby() {
+        ServerLevel level = bot.serverLevel();
+        AABB box = bot.getBoundingBox().inflate(4.0);
+        var items = level.getEntities(bot, box,
+                e -> e instanceof net.minecraft.world.entity.item.ItemEntity && e.isAlive());
+        if (items.isEmpty()) {
+            return false;
+        }
+        items.sort(Comparator.comparingDouble(e -> e.distanceTo(bot)));
+        var nearest = items.get(0);
+        if (nearest.distanceTo(bot) < 1.5) {
+            return false; // 已经很近，原版会自动收
+        }
+        walkToward(nearest.blockPosition());
+        return true;
+    }
+
+    /**
+     * 当前手持工具是否即将损坏。
+     *
+     * <p>真人会在镐子快坏时换一把，这里提供判断供上层决策。</p>
+     */
+    public boolean isToolAboutToBreak() {
+        try {
+            ItemStack held = bot.getInventory().getSelected();
+            if (held.isEmpty() || !held.isDamageableItem()) {
+                return false;
+            }
+            int left = held.getMaxDamage() - held.getDamageValue();
+            return left <= 1;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
 
     /** 判断这一 tick 是否几乎没移动。 */
     private boolean isStuckInPlace() {
@@ -377,31 +762,6 @@ public final class TickActionDriver {
         return moved < 0.02;
     }
 
-    /**
-     * 判断是否需要跳跃。
-     *
-     * <p>真人遇到一格高的台阶会按空格。这里检测前方一格是否有阻挡、
-     * 且其上方是空的（可跳上去）。</p>
-     */
-    private boolean shouldJump(ServerLevel level) {
-        Vec3 pos = bot.position();
-        Vec3 dir = walkTarget.subtract(pos);
-        Vec3 flat = new Vec3(dir.x, 0, dir.z);
-        if (flat.lengthSqr() < 1.0E-4) {
-            return false;
-        }
-        Vec3 ahead = pos.add(flat.normalize().scale(0.6));
-
-        BlockPos front = BlockPos.containing(ahead.x, pos.y, ahead.z);
-        BlockState frontState = level.getBlockState(front);
-        BlockState frontUp = level.getBlockState(front.above());
-
-        // 前方有实体方块，且上方可通过 → 跳
-        boolean blocked = !frontState.isAir() && frontState.isSolidRender(bot.serverLevel(), front);
-        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender(bot.serverLevel(), front.above());
-        return blocked && canPass && bot.onGround();
-    }
-
     /** 清空移动输入（等价于松开所有按键）。 */
     private void clearMovementInput() {
         bot.zza = 0.0f;
@@ -412,6 +772,40 @@ public final class TickActionDriver {
     // ------------------------------------------------------------------
     // 挖掘：走原版 handleBlockBreakAction，自动按硬度算时间
     // ------------------------------------------------------------------
+
+    /**
+     * 选择挖这个方块最合适的工具，并切到手上。
+     *
+     * <p>真人挖矿会先换工具：石头用镐、木头用斧、土用锹。
+     * 这里模仿同样的行为；找不到合适工具就空手挖（会慢很多）。</p>
+     */
+    private void selectBestToolFor(BlockState state) {
+        var inv = bot.getInventory();
+
+        // 先用原版的「工具对当前方块是否更快」来判断，最通用
+        int bestSlot = -1;
+        float bestSpeed = 1.0f;
+
+        for (int i = 0; i < 9; i++) { // 只看快捷栏，真人也是切快捷栏
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) {
+                continue;
+            }
+            try {
+                float speed = s.getDestroySpeed(state);
+                if (speed > bestSpeed) {
+                    bestSpeed = speed;
+                    bestSlot = i;
+                }
+            } catch (Throwable ignored) {
+                // 某些版本/物品不支持，忽略
+            }
+        }
+
+        if (bestSlot >= 0) {
+            inv.selected = bestSlot;
+        }
+    }
 
     private void tickMine() {
         ServerLevel level = bot.serverLevel();
@@ -435,17 +829,24 @@ public final class TickActionDriver {
             // 找下一个同类方块
             BlockPos next = findNearestBlock(level, targetBlock, 24);
             if (next == null) {
+                // 挖完了：先花点时间把掉落物捡起来（真人也会这么做）
+                if (tryPickupNearby()) {
+                    return;
+                }
                 succeed("附近已没有更多 " + shortId(targetBlock) + "，共挖 " + minedSoFar + " 个");
+                return;
+            }
+            // 换目标前先顺路捡掉落物
+            if (minedSoFar > 0 && tryPickupNearby()) {
                 return;
             }
             mineTarget = next;
             return;
         }
 
-        // 距离太远：先走过去
+        // 距离太远：用 A* 走过去（而不是直线顶墙）
         double dist = Math.sqrt(bot.blockPosition().distSqr(mineTarget));
         if (dist > 4.5) {
-            // 用走路推进（复用 walk 逻辑但保持 MINE 状态）
             walkToward(mineTarget);
             return;
         }
@@ -453,9 +854,12 @@ public final class TickActionDriver {
         // 到位后停止移动，开始挖
         clearMovementInput();
 
+        // 真人挖矿前会切换到合适的工具（镐挖石、斧砍木、铲挖土）
+        selectBestToolFor(current);
+
         // 面朝方块（真人挖矿也会看着它）
         lookAtBlock(mineTarget);
-        bot.swing(InteractionHand.MAIN_HAND);
+        bot.swing(InteractionHand.MAIN_HAND, true);
 
         // 原版挖掘：第一次发 START，之后每 tick 发 STOP 继续累积进度
         // 这正是真人客户端持续按住左键时做的事情。
@@ -489,7 +893,7 @@ public final class TickActionDriver {
         bot.setYHeadRot(yaw);
         bot.zza = MOVE_FORWARD;
         bot.xxa = 0.0f;
-        if (shouldJump(bot.serverLevel())) {
+        if (shouldJumpToward(bot.serverLevel(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
             bot.setJumping(true);
         }
     }
@@ -519,7 +923,7 @@ public final class TickActionDriver {
                     mineTarget,
                     ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK,
                     Direction.UP,
-                    bot.serverLevel().getMaxLocalRawBrightness(mineTarget),
+                    BLOCK_BREAK_LIGHT,
                     breakSeq++);
         } catch (Throwable ignored) {
             // 中断失败不影响主流程

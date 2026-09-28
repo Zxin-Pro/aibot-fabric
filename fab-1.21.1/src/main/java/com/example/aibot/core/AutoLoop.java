@@ -111,6 +111,14 @@ public final class AutoLoop {
      */
     private volatile TickActionDriver activeDriver = null;
 
+    /**
+     * 上一 tick 的血量，用于检测「正在挨打」。
+     *
+     * <p>真人被打会立刻反应；这里每 tick 比较血量差，
+     * 掉血超过 0.5 就触发撤离反射。</p>
+     */
+    private float lastKnownHealth = -1.0f;
+
     /** 当前动作对应的步号与动作名，用于动作完成后写记忆。 */
     private long activeStep = 0;
     private String activeActionName = "";
@@ -282,6 +290,24 @@ public final class AutoLoop {
         try {
             float health = bot.getHealth();
             int food = bot.getFoodData().getFoodLevel();
+
+            // 反射 0：正在挨打 / 刚掉过血 → 立即逃离并记录威胁
+            // 真人被打会本能地先跑，而不是继续干活。
+            float lastHealth = this.lastKnownHealth;
+            this.lastKnownHealth = health;
+            if (lastHealth > 0 && health < lastHealth - 0.5f) {
+                float damage = lastHealth - health;
+                ActionExecutor executor = new ActionExecutor(bot, config);
+                ActionParser.ParsedAction flee = ActionParser.fromParams("flee", "distance", 20.0);
+                ActionExecutor.ActionResult r = executor.execute(flee);
+                if (r.async()) {
+                    startActiveAction(executor, "flee", "受击反射",
+                            "受到 " + String.format(java.util.Locale.ROOT, "%.0f", damage) + " 点伤害，先撤离");
+                    longTermMemory.recordFailure("survive", "", "被攻击受伤，需要更警惕周围威胁");
+                    LOGGER.info("[AIBot] 受击反射：掉血 " + damage + "，立即撤离");
+                    return true;
+                }
+            }
 
             // 反射 1：血量极低 → 立即逃离
             if (health <= 6.0f) {
