@@ -1,14 +1,12 @@
 package com.example.aibot.action;
 
+import com.example.aibot.config.AIConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.InteractionHand;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.Mob;
-import net.minecraft.world.entity.animal.Animal;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.item.ItemStack;
@@ -19,85 +17,84 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
  * 动作执行器（1.21.11 实现）。
  *
- * <p>每个动作一个方法，统一返回 {@link ActionResult} 描述成功/失败与结果文本，
- * 供记忆模块与自主循环使用。</p>
- *
- * <p>设计原则：</p>
+ * <p><b>设计原则</b>：所有会改变世界的动作都通过 {@link TickActionDriver}
+ * 走<b>原版玩家输入通道</b>完成，而不是直接改世界。这样假玩家的行为
+ * 与真人玩家在服务端看来完全一致：</p>
  * <ul>
- *   <li>所有动作都是「尽力而为」：失败不抛异常，返回失败结果让 LLM 换策略。</li>
- *   <li>不做长时间阻塞操作；耗时动作（如寻路）由自主循环按 tick 推进。</li>
- *   <li>move 采用简单的直线移动 + 逐步靠近，MVP 不接入 Baritone。</li>
+ *   <li>走路有重力、碰撞、台阶、水中减速</li>
+ *   <li>挖方块要按硬度与工具算时间，消耗工具耐久</li>
+ *   <li>放方块要过原版的朝向/碰撞/可替换性校验</li>
+ *   <li>吃东西有 1.6 秒时长且会被打断</li>
+ *   <li>攻击遵守原版冷却</li>
  * </ul>
+ *
+ * <p>本类只负责「把 LLM 的动作转成驱动指令」并做参数校验；
+ * 实际执行由 {@link TickActionDriver} 每 tick 推进。</p>
  */
 public class ActionExecutor {
 
     private static final Logger LOGGER = Logger.getLogger("aibot-action");
 
-    /** 单次 move 动作最大移动距离（防止瞬移过远造成穿墙）。 */
-    private static final double MAX_MOVE_DISTANCE = 32.0;
+    /** 被控制的假玩家。用 ServerPlayer 以便重生后继续工作。 */
+    protected final ServerPlayer bot;
 
-    /** 判定「到达目标」的距离阈值。 */
-    private static final double ARRIVE_DISTANCE = 1.5;
+    /** 逐 tick 动作驱动器。 */
+    protected final TickActionDriver driver;
 
-    /** 挖掘可触及距离。 */
-    private static final double REACH_DISTANCE = 5.0;
-
-    /**
-     * 被控制的假玩家。
-     *
-     * <p><b>为什么是 ServerPlayer 而不是 AIBotPlayer</b>：
-     * 原版 {@code PlayerList.respawn(...)} 内部会 {@code new ServerPlayer(...)}，
-     * 死亡重生后我们的 {@link AIBotPlayer} 子类实例会被替换成普通 {@code ServerPlayer}。
-     * 用父类型声明可以在重生后继续正常驱动，无需另写一套执行器
-     * （本类用到的全部方法都定义在 ServerPlayer/Entity/Player 上）。</p>
-     */
-    protected final net.minecraft.server.level.ServerPlayer bot;
-
-    public ActionExecutor(net.minecraft.server.level.ServerPlayer bot) {
+    public ActionExecutor(ServerPlayer bot, AIConfig config) {
         this.bot = bot;
+        this.driver = new TickActionDriver(bot, config);
+    }
+
+    /** 取驱动器（自主循环用它查询动作是否完成）。 */
+    public TickActionDriver getDriver() {
+        return driver;
     }
 
     /**
      * 动作执行结果。
      *
      * @param success 是否成功
-     * @param message 结果描述（会写入记忆，保持简短）
+     * @param message 结果描述
+     * @param async   true 表示动作已启动、需要若干 tick 才能完成，
+     *                结果要稍后从 {@link TickActionDriver} 查询
      */
-    public record ActionResult(boolean success, String message) {
+    public record ActionResult(boolean success, String message, boolean async) {
 
         public static ActionResult ok(String message) {
-            return new ActionResult(true, message);
+            return new ActionResult(true, message, false);
         }
 
         public static ActionResult fail(String message) {
-            return new ActionResult(false, message);
+            return new ActionResult(false, message, false);
+        }
+
+        /** 动作已启动，正在逐 tick 进行中。 */
+        public static ActionResult started(String message) {
+            return new ActionResult(true, message, true);
         }
     }
 
     /**
      * 执行一个解析好的动作。
      *
-     * @param parsed LLM 解析出来的动作
-     * @return 执行结果
+     * <p>返回 {@code async=true} 表示动作已交给驱动器，需要后续 tick 推进。</p>
      */
     public ActionResult execute(ActionParser.ParsedAction parsed) {
         String action = parsed.action();
         try {
             switch (action) {
                 case "move":
-                    return move(parsed);
                 case "pathfind":
-                    return pathfind(parsed);
+                    return move(parsed);
                 case "mine":
                     return mine(parsed);
                 case "place":
@@ -116,6 +113,8 @@ public class ActionExecutor {
                     return follow(parsed);
                 case "store":
                     return store(parsed);
+                case "pickup":
+                    return pickup(parsed);
                 case "chat":
                     return chat(parsed);
                 case "look":
@@ -126,24 +125,22 @@ public class ActionExecutor {
                     return ActionResult.fail("未知动作: " + action);
             }
         } catch (Throwable t) {
-            // 任何动作异常都不能让服务器崩溃
             LOGGER.log(Level.WARNING, "[AIBot] 执行动作 " + action + " 时异常", t);
             return ActionResult.fail("动作异常: " + t.getClass().getSimpleName());
         }
     }
 
     // ------------------------------------------------------------------
-    // 已完整实现的动作
+    // 移动：交给驱动器逐 tick 走
     // ------------------------------------------------------------------
 
     /**
-     * 移动到指定坐标。
+     * 走到指定坐标。
      *
-     * <p>MVP 实现：计算方向向量，按最大步长逐步靠近；不做地形寻路。
-     * 如果目标点不可达（如悬空），会在附近停下并返回失败，让 LLM 换策略。</p>
+     * <p><b>不再是瞬移</b>：调用 {@link TickActionDriver#beginWalk}，
+     * 之后由原版物理每 tick 推进，走不过去就失败（和真人一样）。</p>
      */
     protected ActionResult move(ActionParser.ParsedAction parsed) {
-        ServerLevel level = bot.level();
         Vec3 current = bot.position();
 
         double tx = parsed.getDouble("x", current.x);
@@ -160,49 +157,59 @@ public class ActionExecutor {
         Vec3 target = new Vec3(tx, ty, tz);
         double distance = current.distanceTo(target);
 
-        if (distance < ARRIVE_DISTANCE) {
-            return ActionResult.ok("已到达目标点附近");
+        if (distance < 0.9) {
+            return ActionResult.ok("已在目标点附近");
         }
 
-        // 限制单次移动距离，避免瞬移穿墙
-        Vec3 direction = target.subtract(current).normalize();
-        double step = Math.min(distance, MAX_MOVE_DISTANCE);
-        Vec3 next = current.add(direction.scale(step));
-
-        // 安全落地：从目标 XZ 位置向下找第一个可站立的地面
-        BlockPos landing = findGroundBelow(level, BlockPos.containing(next.x, next.y, next.z));
-        if (landing == null) {
-            // 找不到落脚点，就只移动一小步并报告
-            return ActionResult.fail("目标点下方没有可站立地面，无法到达");
-        }
-
-        bot.teleportTo(landing.getX() + 0.5, landing.getY(), landing.getZ() + 0.5);
-        bot.lookAt(net.minecraft.commands.arguments.EntityAnchorArgument.Anchor.EYES, target);
-
-        double moved = current.distanceTo(bot.position());
-        return ActionResult.ok(String.format(java.util.Locale.ROOT,
-                "从(%.0f,%.0f,%.0f)移动到(%.0f,%.0f,%.0f)，前进%.1f格",
-                current.x, current.y, current.z,
-                bot.getX(), bot.getY(), bot.getZ(), moved));
+        // 超时按距离估算：正常人走路约 4.3 格/秒 = 0.215 格/tick
+        int timeout = (int) Math.max(200, distance / 0.215 * 2.5);
+        driver.beginWalk(target, timeout);
+        return ActionResult.started(String.format(java.util.Locale.ROOT,
+                "开始走向 (%.0f, %.0f, %.0f)，距离 %.1f 格", tx, ty, tz, distance));
     }
 
-    /**
-     * 寻路到指定坐标。
-     *
-     * <p>MVP 实现：与 move 共用逻辑，但允许更大距离并倾向选择已加载区块内的路径。
-     * 后续可替换为接入 Baritone 的实现。</p>
-     */
+    /** 寻路：当前版本等同于 move（真实寻路需接入 Baritone）。 */
     protected ActionResult pathfind(ActionParser.ParsedAction parsed) {
-        ActionResult r = move(parsed);
-        return r.success()
-                ? ActionResult.ok("寻路完成：" + r.message())
-                : ActionResult.fail("寻路失败：" + r.message());
+        return move(parsed);
     }
 
+    /** 逃离威胁：朝远离威胁的方向走。 */
+    protected ActionResult flee(ActionParser.ParsedAction parsed) {
+        double distance = parsed.getDouble("distance", 16.0);
+        ServerLevel level = bot.level();
+
+        AABB box = bot.getBoundingBox().inflate(16.0);
+        List<Entity> threats = level.getEntities(bot, box, e -> e instanceof Monster && e.isAlive());
+        if (threats.isEmpty()) {
+            return ActionResult.ok("附近没有威胁，无需逃跑");
+        }
+        threats.sort(Comparator.comparingDouble(e -> e.distanceTo(bot)));
+        Entity threat = threats.get(0);
+
+        Vec3 away = bot.position().subtract(threat.position());
+        if (away.lengthSqr() < 0.01) {
+            away = new Vec3(1, 0, 0);
+        }
+        Vec3 target = bot.position().add(away.normalize().scale(distance));
+
+        int timeout = (int) Math.max(200, distance / 0.215 * 3);
+        driver.beginWalk(target, timeout);
+        return ActionResult.started("开始逃离 " + shortId(String.valueOf(
+                BuiltInRegistries.ENTITY_TYPE.getKey(threat.getType()))));
+    }
+
+    // ------------------------------------------------------------------
+    // 挖掘：走原版破坏流程（按硬度算时间）
+    // ------------------------------------------------------------------
+
     /**
-     * 挖掘指定方块。
+     * 挖掘方块。
      *
-     * <p>实现：在半径内寻找目标方块 → 靠近 → 破坏并掉落物品到背包。</p>
+     * <p><b>不再是瞬间破坏</b>：交给驱动器调用
+     * {@code ServerPlayerGameMode.handleBlockBreakAction}，
+     * 这正是原版处理客户端挖掘包的方法，因此：
+     * 石头要挖 0.75 秒、圆石要 1.15 秒、黑曜石要 9.4 秒，
+     * 工具越好越快，并且会消耗工具耐久。</p>
      */
     protected ActionResult mine(ActionParser.ParsedAction parsed) {
         String blockId = parsed.getString("block", "");
@@ -212,136 +219,27 @@ public class ActionExecutor {
             return ActionResult.fail("mine 动作缺少 block 参数");
         }
 
-        ServerLevel level = bot.level();
-        Block targetBlock = resolveBlock(blockId);
-        if (targetBlock == null) {
+        Block target = resolveBlock(blockId);
+        if (target == null) {
             return ActionResult.fail("未知方块: " + blockId);
         }
 
-        int mined = 0;
-        int attempts = 0;
-        // 每次挖掘都重新找最近的目标，最多尝试 count 次
-        while (mined < count && attempts < count * 3) {
-            attempts++;
-            BlockPos target = findNearestBlock(level, targetBlock, 16);
-            if (target == null) {
-                break;
-            }
-
-            // 距离太远就先靠近
-            double dist = Math.sqrt(bot.blockPosition().distSqr(target));
-            if (dist > REACH_DISTANCE) {
-                BlockPos stand = findGroundBelow(level, target);
-                if (stand != null) {
-                    bot.teleportTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5);
-                }
-            }
-
-            // 破坏方块并掉落（1.21.11 的 destroyBlock 是 4 参数版本：
-            // pos, drop, sourceEntity, recursionLeft）
-            boolean destroyed = level.destroyBlock(target, true, bot, 512);
-            if (destroyed) {
-                mined++;
-            }
+        ServerLevel level = bot.level();
+        BlockPos pos = findNearestBlock(level, target, 24);
+        if (pos == null) {
+            return ActionResult.fail("附近 24 格内找不到 " + shortId(blockId));
         }
 
-        if (mined == 0) {
-            return ActionResult.fail("附近找不到 " + blockId + "，或无法破坏");
-        }
-        return ActionResult.ok("挖掘了 " + mined + " 个 " + shortId(blockId));
+        driver.beginMine(pos, target, count);
+        return ActionResult.started("开始挖掘 " + shortId(blockId) + " x" + count
+                + "，从 " + fmtPos(pos) + " 开始（将按方块硬度耗时）");
     }
-
-    /** 在聊天栏说话。 */
-    protected ActionResult chat(ActionParser.ParsedAction parsed) {
-        String message = parsed.getString("message", "");
-        if (message.trim().isEmpty()) {
-            return ActionResult.fail("chat 动作缺少 message 参数");
-        }
-        // 长度保护，避免刷屏
-        if (message.length() > 120) {
-            message = message.substring(0, 120) + "...";
-        }
-        // getServer() 在 Entity 上不可直接用，通过 level() 拿服务器实例
-        bot.level().getServer().getPlayerList()
-                .broadcastSystemMessage(
-                        net.minecraft.network.chat.Component.literal("<" + bot.getName().getString() + "> " + message),
-                        false);
-        return ActionResult.ok("说了: " + message);
-    }
-
-    /**
-     * 进食：从背包里找食物并吃掉。
-     *
-     * <p>实现：直接调用 eat 逻辑并恢复饥饿值。
-     * 1.21.x 的食物数据在 DataComponents.FOOD 上，这里用简化判断。</p>
-     */
-    protected ActionResult eat(ActionParser.ParsedAction parsed) {
-        String wanted = parsed.getString("item", "");
-        var food = bot.getFoodData();
-
-        if (food.getFoodLevel() >= 20) {
-            return ActionResult.ok("并不饿，跳过进食");
-        }
-
-        // 在背包里找可食用物品
-        var inventory = bot.getInventory();
-        int bestSlot = -1;
-        ItemStack bestStack = ItemStack.EMPTY;
-
-        for (int i = 0; i < inventory.getContainerSize(); i++) {
-            ItemStack stack = inventory.getItem(i);
-            if (stack.isEmpty()) {
-                continue;
-            }
-            if (!isFood(stack)) {
-                continue;
-            }
-            // 指定了物品就精确匹配
-            if (!wanted.isEmpty()) {
-                Identifier key = BuiltInRegistries.ITEM.getKey(stack.getItem());
-                if (key == null || !key.toString().equals(wanted)) {
-                    continue;
-                }
-            }
-            bestSlot = i;
-            bestStack = stack;
-            break;
-        }
-
-        if (bestSlot < 0 || bestStack.isEmpty()) {
-            return ActionResult.fail(wanted.isEmpty() ? "背包里没有食物" : "背包里没有 " + wanted);
-        }
-
-        // 简化实现：恢复饥饿值并消耗一个物品
-        // 真实食用动画/时长由客户端驱动，服务端假玩家直接结算更稳妥
-        int nutrition = 4; // 保守默认值
-        food.eat(nutrition, 0.6f);
-        bestStack.shrink(1);
-
-        String name = String.valueOf(BuiltInRegistries.ITEM.getKey(bestStack.getItem()));
-        return ActionResult.ok("进食了 " + shortId(name) + "，当前饥饿值 " + food.getFoodLevel());
-    }
-
-    /** 观察四周（信息性动作，不改变世界）。 */
-    protected ActionResult look(ActionParser.ParsedAction parsed) {
-        // 随机? 不——缓存友好要求避免随机。这里转向正北，稳定可复现。
-        bot.setYRot(0.0F);
-        bot.setXRot(0.0F);
-        return ActionResult.ok("环顾四周完成");
-    }
-
-    // ------------------------------------------------------------------
-    // 建造与合成（长期自主运行的必备能力）
-    // ------------------------------------------------------------------
 
     /**
      * 放置方块。
      *
-     * <p>实现方式：从背包找到对应方块物品 → 在目标位置直接写入方块状态并扣掉一个物品。
-     * 不走 {@code BlockItem.useOn} 的上下文流程，因为假玩家没有真正的"手持交互"，
-     * 直接写世界更可靠、也更容易预测。</p>
-     *
-     * <p>坐标缺省时放在假玩家脚下前方一格。</p>
+     * <p>走原版 {@code useItemOn}，因此需要手上真的拿着该方块，
+     * 且目标位置必须通过原版校验。</p>
      */
     protected ActionResult place(ActionParser.ParsedAction parsed) {
         String blockId = parsed.getString("block", "");
@@ -349,62 +247,41 @@ public class ActionExecutor {
             return ActionResult.fail("place 动作缺少 block 参数");
         }
 
-        ServerLevel level = bot.level();
         Block target = resolveBlock(blockId);
         if (target == null) {
             return ActionResult.fail("未知方块: " + blockId);
         }
 
-        // 目标坐标：缺省为玩家前方一格
         BlockPos base = bot.blockPosition();
         int dx = parsed.getInt("x", 1);
         int dy = parsed.getInt("y", 0);
         int dz = parsed.getInt("z", 0);
         BlockPos pos = base.offset(dx, dy, dz);
 
+        ServerLevel level = bot.level();
         if (!level.isLoaded(pos)) {
             return ActionResult.fail("目标位置所在区块未加载");
         }
-        // 不覆盖已有实体方块（避免把建筑挖穿）
-        BlockState existing = level.getBlockState(pos);
-        if (!existing.isAir() && existing.isSolidRender()) {
-            return ActionResult.fail("目标位置已被 " + shortId(blockIdOf(existing)) + " 占据");
-        }
-        // 从背包找这个方块物品
-        int slot = findBlockItemSlot(target);
-        if (slot < 0) {
-            // 创造模式兜底：没有物品也允许放置
-            if (bot.isCreative()) {
-                level.setBlockAndUpdate(pos, target.defaultBlockState());
-                return ActionResult.ok("已在 (" + pos.getX() + "," + pos.getY() + "," + pos.getZ()
-                        + ") 放置 " + shortId(blockId) + "（创造模式）");
-            }
+
+        // 手上没有就先从背包找
+        if (findBlockItemSlot(target) < 0) {
             return ActionResult.fail("背包里没有 " + shortId(blockId));
         }
 
-        // 写入方块并扣物品
-        boolean placed = level.setBlockAndUpdate(pos, target.defaultBlockState());
-        if (!placed) {
-            return ActionResult.fail("放置失败（位置不合法）");
-        }
-        bot.getInventory().removeItem(slot, 1);
-
-        return ActionResult.ok("已在 (" + pos.getX() + "," + pos.getY() + "," + pos.getZ()
-                + ") 放置 " + shortId(blockId));
+        driver.beginPlace(pos, target);
+        return ActionResult.started("开始放置 " + shortId(blockId) + " 于 " + fmtPos(pos));
     }
+
+    // ------------------------------------------------------------------
+    // 合成：这是唯一允许「非 tick 驱动」的动作
+    // ------------------------------------------------------------------
 
     /**
      * 合成物品。
      *
-     * <p><b>1.21.11 的配方 API 与旧版完全不同</b>（这是本版本最需要留意的改动之一）：
-     * <ul>
-     *   <li>旧版：{@code recipe.getResultItem(registryAccess)} / {@code recipe.getIngredients()}</li>
-     *   <li>1.21.11：结果要通过 {@code recipe.display()} 拿到 {@code RecipeDisplay}，
-     *       再 {@code display.result().resolveForFirstStack(...)}；
-     *       材料要从 {@code recipe.placementInfo().ingredients()} 取。</li>
-     * </ul>
-     * 这里按新 API 实现。这样可以避开原版合成界面（假玩家没有界面），
-     * 同时仍然尊重真实配方——材料不够就是合成不了。</p>
+     * <p><b>说明</b>：合成在真人操作里是「开界面点配方」，
+     * 假玩家没有客户端界面。这里在服务端按真实配方规则结算
+     * （材料必须齐全、产物按配方数量给），不凭空产出。</p>
      */
     protected ActionResult craft(ActionParser.ParsedAction parsed) {
         String itemId = parsed.getString("item", "");
@@ -418,7 +295,6 @@ public class ActionExecutor {
         if (key == null) {
             return ActionResult.fail("非法物品 ID: " + itemId);
         }
-        // Registry.getValue(Identifier) 直接返回 T，比 get() 的 Optional<Holder> 更方便
         net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.getValue(key);
         if (targetItem == null || targetItem == Items.AIR) {
             return ActionResult.fail("未知物品: " + itemId);
@@ -438,7 +314,6 @@ public class ActionExecutor {
                 continue;
             }
             recipeExists = true;
-            // 找到配方后还要确认材料齐全
             if (hasIngredients(holder.value())) {
                 matchedRecipe = holder;
                 matchedResult = result;
@@ -449,13 +324,11 @@ public class ActionExecutor {
         if (matchedRecipe == null || matchedResult.isEmpty()) {
             return ActionResult.fail(recipeExists
                     ? "材料不足，无法合成 " + shortId(full)
-                    : "找不到合成 " + shortId(full) + " 的配方（可能需要工作台或特殊结构）");
+                    : "找不到合成 " + shortId(full) + " 的配方");
         }
 
-        // 消耗材料
         consumeIngredients(matchedRecipe.value());
 
-        // 放入产物
         int perCraft = Math.max(1, matchedResult.getCount());
         int total = perCraft * count;
         while (total > 0) {
@@ -463,8 +336,6 @@ public class ActionExecutor {
             ItemStack out = matchedResult.copy();
             out.setCount(batch);
             if (!bot.getInventory().add(out)) {
-                // 背包满：掉落在地上。
-                // 26.3 的 drop 多了 Prediction 参数（PREDICTED / SERVER_ONLY）
                 bot.drop(out, false, net.minecraft.util.Prediction.SERVER_ONLY);
             }
             total -= batch;
@@ -474,11 +345,7 @@ public class ActionExecutor {
                 + "（共 " + (perCraft * count) + " 个）");
     }
 
-    /**
-     * 取配方的产物（适配 1.21.11 的 RecipeDisplay 体系）。
-     *
-     * @return 产物物品堆；无法解析时返回空堆
-     */
+    /** 取配方产物（1.21.11 的 RecipeDisplay 体系）。 */
     protected ItemStack resultOf(net.minecraft.world.item.crafting.Recipe<?> recipe,
                                  net.minecraft.util.context.ContextMap ctx) {
         try {
@@ -486,7 +353,6 @@ public class ActionExecutor {
             if (displays == null || displays.isEmpty()) {
                 return ItemStack.EMPTY;
             }
-            // 取第一个展示项的结果槽位
             var slot = displays.get(0).result();
             if (slot == null) {
                 return ItemStack.EMPTY;
@@ -498,10 +364,8 @@ public class ActionExecutor {
         }
     }
 
-    /** 检查玩家背包是否满足某配方的全部材料。 */
     protected boolean hasIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
-            // 1.21.11 用 placementInfo().ingredients()（旧版是 getIngredients()）
             var info = recipe.placementInfo();
             if (info == null) {
                 return false;
@@ -512,7 +376,7 @@ public class ActionExecutor {
             }
             for (var ing : ingredients) {
                 if (ing == null || ing.isEmpty()) {
-                    continue; // 空槽位在有序配方中是允许的
+                    continue;
                 }
                 if (!hasIngredient(ing)) {
                     return false;
@@ -524,7 +388,6 @@ public class ActionExecutor {
         }
     }
 
-    /** 背包里是否有某个 Ingredient 需要的物品。 */
     protected boolean hasIngredient(net.minecraft.world.item.crafting.Ingredient ing) {
         var inv = bot.getInventory();
         for (int i = 0; i < inv.getContainerSize(); i++) {
@@ -536,7 +399,6 @@ public class ActionExecutor {
         return false;
     }
 
-    /** 消耗一次配方所需的材料。 */
     protected void consumeIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
             var info = recipe.placementInfo();
@@ -561,136 +423,93 @@ public class ActionExecutor {
         }
     }
 
-    /** 在背包中查找能放置出指定方块的物品槽位。 */
-    protected int findBlockItemSlot(Block block) {
-        var inv = bot.getInventory();
-        for (int i = 0; i < inv.getContainerSize(); i++) {
-            ItemStack s = inv.getItem(i);
-            if (s.isEmpty()) {
-                continue;
-            }
-            if (s.getItem() instanceof net.minecraft.world.item.BlockItem bi && bi.getBlock() == block) {
-                return i;
-            }
-        }
-        return -1;
-    }
+    // ------------------------------------------------------------------
+    // 其余动作
+    // ------------------------------------------------------------------
 
-    /** 攻击目标。 */
+    /** 攻击：交给驱动器，遵守原版冷却。 */
     protected ActionResult attack(ActionParser.ParsedAction parsed) {
         String target = parsed.getString("target", "");
-        // 先做一个最小可用版本：攻击最近的敌对生物
-        ServerLevel level = bot.level();
-        AABB box = bot.getBoundingBox().inflate(6.0);
-        List<Entity> entities = level.getEntities(bot, box, e -> e instanceof Monster && e.isAlive());
-        if (entities.isEmpty()) {
-            return ActionResult.fail("附近没有可攻击的敌对生物");
-        }
-        entities.sort(Comparator.comparingDouble(e -> e.distanceTo(bot)));
-        Entity victim = entities.get(0);
-        victim.hurtServer(level, level.damageSources().playerAttack(bot), 4.0f);
-        return ActionResult.ok("攻击了 " + shortId(String.valueOf(
-                BuiltInRegistries.ENTITY_TYPE.getKey(victim.getType()))));
+        driver.beginAttack(target);
+        return ActionResult.started("开始攻击" + (target.isEmpty() ? "最近目标" : " " + shortId(target)));
     }
 
-    /** 逃离：向远离威胁的方向移动。 */
-    protected ActionResult flee(ActionParser.ParsedAction parsed) {
-        double distance = parsed.getDouble("distance", 16.0);
-        ServerLevel level = bot.level();
-
-        // 找最近的威胁
-        AABB box = bot.getBoundingBox().inflate(16.0);
-        List<Entity> threats = level.getEntities(bot, box, e -> e instanceof Monster && e.isAlive());
-        if (threats.isEmpty()) {
-            return ActionResult.ok("附近没有威胁，无需逃跑");
+    /** 进食：走原版 startUsingItem，有 1.6 秒时长。 */
+    protected ActionResult eat(ActionParser.ParsedAction parsed) {
+        var food = bot.getFoodData();
+        if (food.getFoodLevel() >= 20) {
+            return ActionResult.ok("并不饿，跳过进食");
         }
-        threats.sort(Comparator.comparingDouble(e -> e.distanceTo(bot)));
-        Entity threat = threats.get(0);
-
-        Vec3 away = bot.position().subtract(threat.position());
-        if (away.lengthSqr() < 0.01) {
-            away = new Vec3(1, 0, 0);
-        }
-        Vec3 target = bot.position().add(away.normalize().scale(distance));
-
-        BlockPos landing = findGroundBelow(level, BlockPos.containing(target.x, target.y, target.z));
-        if (landing == null) {
-            return ActionResult.fail("逃跑方向上没有可站立地面");
-        }
-        bot.teleportTo(landing.getX() + 0.5, landing.getY(), landing.getZ() + 0.5);
-        return ActionResult.ok("逃离威胁 " + shortId(String.valueOf(
-                BuiltInRegistries.ENTITY_TYPE.getKey(threat.getType()))));
+        String item = parsed.getString("item", "");
+        driver.beginEat(item);
+        return ActionResult.started("开始进食" + (item.isEmpty() ? "" : " " + shortId(item))
+                + "（需 1.6 秒，会被攻击打断）");
     }
 
-    /** 跟随玩家。TODO: 后续实现（需要每 tick 跟踪目标玩家位置）。 */
-    protected ActionResult follow(ActionParser.ParsedAction parsed) {
-        String playerName = parsed.getString("player", "");
-        if (playerName.isEmpty()) {
-            return ActionResult.fail("follow 动作缺少 player 参数");
-        }
-        var players = bot.level().players();
-        for (var p : players) {
-            if (p.getName().getString().equalsIgnoreCase(playerName)) {
-                // 最小实现：一次跳跃式靠近
-                var target = p.position();
-                BlockPos landing = findGroundBelow(bot.level(),
-                        BlockPos.containing(target.x, target.y, target.z));
-                if (landing != null) {
-                    bot.teleportTo(landing.getX() + 0.5, landing.getY(), landing.getZ() + 0.5);
-                    return ActionResult.ok("跟随 " + playerName + " 移动了一程");
-                }
-            }
-        }
-        return ActionResult.fail("找不到玩家 " + playerName);
+    /** 拾取附近掉落物。 */
+    protected ActionResult pickup(ActionParser.ParsedAction parsed) {
+        driver.beginPickup();
+        return ActionResult.started("开始拾取附近掉落物");
     }
 
-    /**
-    /**
-     * 睡觉。
-     *
-     * <p>实现：寻找最近的床并让假玩家上床。
-     * 找不到床时返回失败，让 LLM 去造一张床（羊毛 + 木板）。</p>
-     *
-     * <p><b>26.3 的重要 API 变更</b>：{@code startSleepInBed} 的参数完全变了 ——
-     * 旧版只需 {@code (BlockPos)}，26.3 需要
-     * {@code (AbstractBedBlock, BlockState, BedRule, BlockPos)}。
-     * 其中 {@code BedRule} 要通过 {@code AbstractBedBlock.getBedRule(level, pos)} 取，
-     * 它描述了「这张床允不允许睡、要不要设置重生点」等规则。</p>
-     */
+    /** 聊天。 */
+    protected ActionResult chat(ActionParser.ParsedAction parsed) {
+        String message = parsed.getString("message", "");
+        if (message.trim().isEmpty()) {
+            return ActionResult.fail("chat 动作缺少 message 参数");
+        }
+        if (message.length() > 120) {
+            message = message.substring(0, 120) + "...";
+        }
+        bot.level().getServer().getPlayerList()
+                .broadcastSystemMessage(
+                        net.minecraft.network.chat.Component.literal("<" + bot.getName().getString() + "> " + message),
+                        false);
+        return ActionResult.ok("说了: " + message);
+    }
+
+    /** 环顾四周。 */
+    protected ActionResult look(ActionParser.ParsedAction parsed) {
+        bot.setYRot(0.0F);
+        bot.setXRot(0.0F);
+        return ActionResult.ok("环顾四周完成");
+    }
+
+    /** 睡觉：需要夜晚且有床（走原版 startSleepInBed）。 */
     protected ActionResult sleep(ActionParser.ParsedAction parsed) {
         ServerLevel level = bot.level();
+        long dayTime = level.getOverworldClockTime() % 24000L;
+        if (dayTime < 13000L) {
+            return ActionResult.fail("现在是白天，无法睡觉");
+        }
 
-        // 坐标可选：给了就用给的，没给就找最近的床
         BlockPos bedPos = null;
         if (parsed.has("x")) {
             bedPos = BlockPos.containing(parsed.getDouble("x", 0),
                     parsed.getDouble("y", 0), parsed.getDouble("z", 0));
             if (!(level.getBlockState(bedPos).getBlock()
                     instanceof net.minecraft.world.level.block.AbstractBedBlock)) {
-                bedPos = null; // 指定位置不是床，退化为自动寻找
+                bedPos = null;
             }
         }
         if (bedPos == null) {
-            BlockPos found = findNearestBlockOfType(level,
-                    net.minecraft.world.level.block.AbstractBedBlock.class, 24);
-            if (found == null) {
+            bedPos = findNearestBlockOfType(level, net.minecraft.world.level.block.AbstractBedBlock.class, 24);
+            if (bedPos == null) {
                 return ActionResult.fail("附近 24 格内找不到床");
             }
-            bedPos = found;
         }
 
-        // 走到床边
+        // 先走过去，再上床
         double dist = Math.sqrt(bot.blockPosition().distSqr(bedPos));
-        if (dist > 3.0) {
-            BlockPos stand = findGroundBelow(level, bedPos);
-            if (stand != null) {
-                bot.teleportTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5);
-            }
+        if (dist > 2.5) {
+            driver.beginWalk(new Vec3(bedPos.getX() + 0.5, bedPos.getY(), bedPos.getZ() + 0.5),
+                    (int) Math.max(200, dist / 0.215 * 3));
+            return ActionResult.started("先走到床边，再尝试入睡");
         }
 
-        // 真正上床（26.3 需要床方块、床状态与 BedRule）
         try {
-            BlockState bedState = level.getBlockState(bedPos);
+            // 26.3 的 startSleepInBed 需要 (床方块, 床状态, BedRule, 坐标)
+            net.minecraft.world.level.block.state.BlockState bedState = level.getBlockState(bedPos);
             var bedBlock = (net.minecraft.world.level.block.AbstractBedBlock) bedState.getBlock();
             net.minecraft.world.attribute.BedRule rule = bedBlock.getBedRule(level, bedPos);
 
@@ -700,47 +519,57 @@ public class ActionExecutor {
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {
-            LOGGER.log(Level.WARNING, "[AIBot] 睡觉失败", t);
             return ActionResult.fail("睡觉异常: " + t.getClass().getSimpleName());
         }
     }
 
+    /** 跟随玩家：走过去，与原版一致。 */
+    protected ActionResult follow(ActionParser.ParsedAction parsed) {
+        String playerName = parsed.getString("player", "");
+        if (playerName.isEmpty()) {
+            return ActionResult.fail("follow 动作缺少 player 参数");
+        }
+        for (var p : bot.level().players()) {
+            if (p.getName().getString().equalsIgnoreCase(playerName)) {
+                double dist = p.distanceTo(bot);
+                driver.beginWalk(p.position(), (int) Math.max(200, dist / 0.215 * 3));
+                return ActionResult.started("开始走向玩家 " + playerName);
+            }
+        }
+        return ActionResult.fail("找不到玩家 " + playerName);
+    }
+
     /**
-     * 把背包物品存入附近容器（箱子、桶等）。
+     * 存放物品到容器。
      *
-     * <p>实现：扫描附近 8 格内的方块实体，找到实现了 {@code Container} 的容器，
-     * 把指定物品（或全部可存物品）转移进去。这是"整理背包"和建立基地仓储的关键。</p>
+     * <p>真人也是打开箱子再放，这里直接与容器交互（服务端等价操作）。</p>
      */
     protected ActionResult store(ActionParser.ParsedAction parsed) {
         String wanted = parsed.getString("item", "");
         ServerLevel level = bot.level();
 
-        // 1. 找最近的容器
-        net.minecraft.world.Container container = findNearestContainer(level, 8);
+        net.minecraft.world.Container container = findNearestContainer(level, 6);
         if (container == null) {
-            return ActionResult.fail("附近 8 格内没有可用的容器（箱子/桶）");
+            return ActionResult.fail("附近 6 格内没有可用的容器（箱子/桶）");
         }
 
         var inv = bot.getInventory();
         int movedCount = 0;
         int movedKinds = 0;
 
-        // 2. 逐个槽位转移
-        // 注意：跳过快捷栏前 9 格，避免把正在用的工具存走
+        // 跳过快捷栏前 9 格，避免把正在用的工具存走
         for (int i = 9; i < inv.getContainerSize(); i++) {
             ItemStack stack = inv.getItem(i);
             if (stack.isEmpty()) {
                 continue;
             }
-            // 指定了物品就精确匹配
             if (!wanted.isEmpty()) {
                 Identifier key = BuiltInRegistries.ITEM.getKey(stack.getItem());
-                if (key == null || !key.toString().equals(wanted)
-                        && !key.toString().equals("minecraft:" + wanted)) {
+                if (key == null || (!key.toString().equals(wanted)
+                        && !key.toString().equals("minecraft:" + wanted))) {
                     continue;
                 }
             }
-
             int before = stack.getCount();
             ItemStack remaining = insertIntoContainer(container, stack);
             int moved = before - remaining.getCount();
@@ -760,20 +589,13 @@ public class ActionExecutor {
         return ActionResult.ok("存入 " + movedKinds + " 种物品，共 " + movedCount + " 个");
     }
 
-    /**
-     * 把物品堆尽量塞进容器。
-     *
-     * @return 没塞进去的剩余部分（全部塞入时返回空堆）
-     */
     protected ItemStack insertIntoContainer(net.minecraft.world.Container container, ItemStack stack) {
         for (int i = 0; i < container.getContainerSize() && !stack.isEmpty(); i++) {
             ItemStack slot = container.getItem(i);
-            // 空槽：直接放
             if (slot.isEmpty()) {
                 container.setItem(i, stack.copy());
                 return ItemStack.EMPTY;
             }
-            // 同类物品：合并
             if (ItemStack.isSameItemSameComponents(slot, stack)) {
                 int max = Math.min(container.getMaxStackSize(), slot.getMaxStackSize());
                 int space = max - slot.getCount();
@@ -788,12 +610,15 @@ public class ActionExecutor {
         return stack;
     }
 
+    // ------------------------------------------------------------------
+    // 工具方法
+    // ------------------------------------------------------------------
+
     /** 找最近的实现了 Container 的方块实体。 */
     protected net.minecraft.world.Container findNearestContainer(ServerLevel level, int radius) {
         BlockPos center = bot.blockPosition();
         net.minecraft.world.Container best = null;
         double bestDist = Double.MAX_VALUE;
-
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -4; dy <= 4; dy++) {
                 for (int dz = -radius; dz <= radius; dz++) {
@@ -815,12 +640,11 @@ public class ActionExecutor {
         return best;
     }
 
-    /** 在半径内寻找最近的指定类型的方块（如床）。 */
+    /** 在半径内寻找最近的某类方块。 */
     protected BlockPos findNearestBlockOfType(ServerLevel level, Class<?> blockClass, int radius) {
         BlockPos center = bot.blockPosition();
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
-
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -5; dy <= 5; dy++) {
                 for (int dz = -radius; dz <= radius; dz++) {
@@ -841,47 +665,11 @@ public class ActionExecutor {
         return best;
     }
 
-    // ------------------------------------------------------------------
-    // 工具方法
-    // ------------------------------------------------------------------
-
-    /**
-     * 从给定位置向下寻找第一个可站立的地面。
-     *
-     * @return 可站立的方块坐标上方位置；找不到返回 null
-     */
-    protected BlockPos findGroundBelow(ServerLevel level, BlockPos from) {
-        // 向上最多找 8 格，向下最多找 16 格
-        for (int dy = 8; dy >= -16; dy--) {
-            BlockPos feet = from.offset(0, dy, 0);
-            if (!level.isLoaded(feet)) {
-                continue;
-            }
-            BlockState below = level.getBlockState(feet.below());
-            BlockState at = level.getBlockState(feet);
-            BlockState above = level.getBlockState(feet.above());
-
-            boolean solidBelow = !below.isAir() && below.isSolidRender();
-            boolean feetFree = at.isAir() || !at.isSolidRender();
-            boolean headFree = above.isAir() || !above.isSolidRender();
-
-            if (solidBelow && feetFree && headFree) {
-                return feet;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 在半径内寻找最近的指定方块。
-     *
-     * @return 方块坐标；找不到返回 null
-     */
+    /** 在半径内找最近的指定方块。 */
     protected BlockPos findNearestBlock(ServerLevel level, Block target, int radius) {
         BlockPos center = bot.blockPosition();
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
-
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dy = -6; dy <= 6; dy++) {
                 for (int dz = -radius; dz <= radius; dz++) {
@@ -902,34 +690,32 @@ public class ActionExecutor {
         return best;
     }
 
-    /** 按注册 ID 解析方块；支持带或不带 minecraft: 前缀。 */
+    /** 在背包里找能放目标方块的物品槽位。 */
+    protected int findBlockItemSlot(Block block) {
+        var inv = bot.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (s.getItem() instanceof net.minecraft.world.item.BlockItem bi && bi.getBlock() == block) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 按注册 ID 解析方块。 */
     protected Block resolveBlock(String id) {
         String full = id.contains(":") ? id : "minecraft:" + id;
         Identifier key = Identifier.parse(full);
         if (key == null) {
             return null;
         }
-        // Registry.getValue(Identifier) 直接返回 T（不是 Holder），找不到时返回 null
         Block b = BuiltInRegistries.BLOCK.getValue(key);
         return b == null || b == Blocks.AIR ? null : b;
     }
 
-    /**
-     * 判断物品是否可食用。
-     * 1.20.5+ 食物信息在 DataComponents.FOOD 上。
-     */
-    protected boolean isFood(ItemStack stack) {
-        try {
-            return stack.has(net.minecraft.core.component.DataComponents.FOOD);
-        } catch (Throwable t) {
-            // 兜底：用常见食物列表判断
-            return stack.is(Items.BREAD) || stack.is(Items.APPLE)
-                    || stack.is(Items.COOKED_BEEF) || stack.is(Items.COOKED_PORKCHOP)
-                    || stack.is(Items.GOLDEN_APPLE) || stack.is(Items.CARROT);
-        }
-    }
-
-    /** 去掉 minecraft: 前缀，缩短日志与提示词长度。 */
     protected static String shortId(String id) {
         if (id == null) {
             return "";
@@ -937,9 +723,7 @@ public class ActionExecutor {
         return id.startsWith("minecraft:") ? id.substring("minecraft:".length()) : id;
     }
 
-    /** 取方块状态的注册 ID 字符串。 */
-    protected static String blockIdOf(BlockState state) {
-        Identifier key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
-        return key == null ? "unknown" : key.toString();
+    protected static String fmtPos(BlockPos p) {
+        return "(" + p.getX() + ", " + p.getY() + ", " + p.getZ() + ")";
     }
 }

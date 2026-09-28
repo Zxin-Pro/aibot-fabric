@@ -77,8 +77,15 @@ public class Aibot implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(this::onServerStopping);
 
-        // 2. 每个 tick 驱动自主循环
-        ServerTickEvents.END_SERVER_TICK.register(this::onServerTick);
+        // 2. tick 驱动自主循环。
+        //
+        // 【关键】必须用 START_SERVER_TICK，不能用 END_SERVER_TICK。
+        // 原因：走路是通过设置玩家的 zza/xxa（等价于真人按住 W）实现的，
+        // 这些输入会被「玩家自己的 tick」消费。真人客户端的按键包也是在
+        // tick 之前就到达服务端的。若放在 END 事件里设置，输入要等到下一
+        // tick 才被消费，等于白白慢一拍，且可能被原版重置掉。
+        ServerTickEvents.START_SERVER_TICK.register(this::onServerTickStart);
+        ServerTickEvents.END_SERVER_TICK.register(this::onServerTickEnd);
 
         // 3. 注册 /aibot 命令树
         CommandRegistrationCallback.EVENT.register((dispatcher, buildContext, selection) -> {
@@ -164,9 +171,12 @@ public class Aibot implements ModInitializer {
     }
 
     /**
-     * 每个服务器 tick 调用：驱动自主循环。
+     * tick 开始：推进自主循环与跨 tick 动作。
+     *
+     * <p>必须在玩家实体 tick <b>之前</b>设置移动输入，
+     * 否则假玩家会比真人慢一拍（详见 onInitialize 里的说明）。</p>
      */
-    private void onServerTick(MinecraftServer server) {
+    private void onServerTickStart(MinecraftServer server) {
         this.server = server;
         if (this.autoLoop == null) {
             return;
@@ -183,6 +193,13 @@ public class Aibot implements ModInitializer {
                 // 忽略二次异常
             }
         }
+    }
+
+    /**
+     * tick 结束：目前没有必须在这里做的事，保留钩子便于将来扩展。
+     */
+    private void onServerTickEnd(MinecraftServer server) {
+        // 预留：例如统计、周期性落盘等
     }
 
     /**

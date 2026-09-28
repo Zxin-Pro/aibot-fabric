@@ -14,32 +14,69 @@
 
 ---
 
-## 0.5 完全自主运行（本版本核心能力）
+## 0.5 完全自主运行 + 与真人玩家行为一致
 
-让假玩家「一直玩下去」需要解决的四个问题，本项目均已实现：
+### 核心原则：除了「谁在操控」，其余和真人完全一样
+
+假玩家不是在「作弊改世界」，而是通过**原版玩家输入通道**驱动，
+服务端看到的行为与真人客户端完全一致：
+
+| 行为 | 真人玩家 | 本模组（v0.3.0 起） | 之前的作弊实现（已废弃） |
+|---|---|---|---|
+| 走路 | 按 W，逐 tick 移动 | 设置 `zza`/`xxa`，由原版 `travel()` 推进 | ❌ `teleportTo` 瞬移 |
+| 重力/碰撞 | 有 | **有**（原版物理） | ❌ 无，可穿墙 |
+| 上台阶 | 按空格跳 | `setJumping(true)`（检测前方阻挡时） | ❌ 直接飞过去 |
+| 挖方块 | 按住左键，按硬度耗时 | `gameMode.handleBlockBreakAction(...)` | ❌ `destroyBlock` 瞬间破坏 |
+| 工具耐久 | 消耗 | **消耗** | ❌ 不消耗 |
+| 挖矿速度 | 受工具/效率附魔影响 | **受影响** | ❌ 恒定瞬间 |
+| 放方块 | 右键，走放置校验 | `gameMode.useItemOn(...)` | ❌ `setBlockAndUpdate` 凭空放 |
+| 吃东西 | 1.6 秒，会被打断 | `startUsingItem(...)`，**原版 tick 结算** | ❌ `food.eat()` 瞬间结算 |
+| 攻击 | 等冷却条 | 检查 `getAttackStrengthScale` | ❌ 无视冷却 |
+| 挖坏动画 | 有 | **有**（发真实的破坏包序列） | ❌ 无 |
+
+### 实现方式
+
+关键类是 `TickActionDriver`，它每 tick 推进一次「当前动作」：
+
+```
+START_SERVER_TICK  →  TickActionDriver.tick()  →  设置输入 / 发包
+                                                  ↓
+                                      原版玩家实体 tick 消费输入
+                                      （移动、挖矿进度、进食计时）
+```
+
+**为什么必须用 `START_SERVER_TICK`**：走路靠设置 `zza`（等价于按住 W），
+这些输入会被**玩家自己的 tick** 消费。真人客户端的按键包也是在 tick 之前
+到达服务端的。若放在 `END_SERVER_TICK` 里设置，输入要等到下一 tick 才生效，
+等于慢一拍，还可能被原版重置。
+
+### 长期自主运行的三项保障
 
 | 问题 | 解决方案 | 实现位置 |
 |---|---|---|
-| 死了就彻底停机 | **死亡自动重生**：检测死亡 → 等待 → 调用原版 respawn → 继续循环 | `AutoLoop.handleDeath()` |
-| 跑 200 步就停 | **移除步数上限**（默认 0 = 无限），可选自动续跑 | `AIConfig.maxStepsPerSession` |
-| 反复横跳做不成事 | **结构化任务计划**：目标拆解成任务栈，完成一步才推进 | `TaskPlan` |
-| 走远就找不到家 | **地标记忆**：基地/箱子/矿洞坐标持久化，提示词里带相对距离 | `LandmarkMemory` |
-| LLM 判断失误导致猝死 | **生存反射**：血量/饥饿过低时绕过 LLM 强制执行自保 | `AutoLoop.runSurvivalReflex()` |
-| 卡在做不到的目标上空转 | **卡住自动恢复**：任务连续失败 5 次自动跳过；连续失败触发换策略指令 | `TaskPlan.failCurrent()` |
+| 死了就彻底停机 | **死亡自动重生**，循环不中断，保留物品栏 | `AutoLoop.handleDeath()` |
+| 跑 200 步就停 | **移除步数上限**（默认 0 = 无限） | `AIConfig.maxStepsPerSession` |
+| 反复横跳做不成事 | **结构化任务计划**（任务栈） | `TaskPlan` |
+| 走远就找不到家 | **地标记忆**，提示词带相对距离 | `LandmarkMemory` |
+| LLM 失误导致猝死 | **生存反射**，绕过 LLM 强制执行自保 | `AutoLoop.runSurvivalReflex()` |
+| 卡在死路上空转 | 任务连续失败自动跳过 | `TaskPlan.failCurrent()` |
 
 ### 关键实现细节（踩坑记录）
 
 1. **`PlayerList.respawn()` 会丢弃我们的子类。**
    原版内部是 `new ServerPlayer(...)`，重生后拿到的是**普通 ServerPlayer**，
-   不是我们的 `AIBotPlayer`。因此：
+   不是 `AIBotPlayer`。因此：
    - `FakePlayerManager` 同时保存 `currentBot` 与 `plainBot`，用 `getPlayer()` 统一取；
-   - `ActionExecutor` / `StateCollector` 的参数类型放宽为 `ServerPlayer`，重生后仍能正常驱动。
+   - `ActionExecutor` / `StateCollector` / `TickActionDriver` 的参数类型都是 `ServerPlayer`。
 
-2. **重生保留物品栏。** `respawn(player, true)` 的第二个参数为 `true`，
-   否则一死辛苦攒的资源全丢，谈不上长期经营。
+2. **动作是跨 tick 的，不是瞬间的。**
+   `ActionExecutor.execute()` 返回 `async=true` 表示「已启动」，
+   真正结果由 `AutoLoop.tickActiveAction()` 在动作结束时统一记录。
+   走远路可能几百 tick，挖黑曜石要 188 tick（9.4 秒，和真人一样）。
 
-3. **计划跨重启持久化。** 计划写入 `config/aibot/plan.json`，
-   服务器重启后自动恢复，接着做没做完的事。
+3. **重生保留物品栏**（`respawn(player, true)`），否则一死资源全丢。
+
+4. **计划跨重启持久化**到 `config/aibot/plan.json`。
 
 ---
 
@@ -449,27 +486,31 @@ src/main/java/com/example/aibot/
 | **配方产物** | `getResultItem(RegistryAccess)` | `getResultItem(HolderLookup.Provider)` | **`display().result().resolveForFirstStack(...)`** | 同左 |
 | **配方材料** | `getIngredients()` | `getIngredients()` | **`placementInfo().ingredients()`** | 同左 |
 | **配方容器** | 直接 `Recipe<?>` | `RecipeHolder<?>` | `RecipeHolder<?>` | `RecipeHolder<?>` |
-| **掉落物品** | `drop(stack, false)` | 同左 | 同左 | **需加 `Prediction` 参数** |
+| **掉落物品** | `drop(stack, false)` | 同左 | 同左 | **`drop(stack, false, Prediction)`** |
+| **挥手动画** | `swing(hand)` | `swing(hand)` | `swing(hand)` | **`swing(hand, SwingAnimation, boolean)`** |
 | **睡觉** | `startSleepInBed(pos)` | 同左 | 同左 | **`startSleepInBed(bedBlock, state, BedRule, pos)`** |
-| 服务器目录 | `getServerDirectory()` 返回 `File` | 同左 | 返回 `Path` | 返回 `Path` |
+| **手持槽位** | `Inventory.selected` 字段 | `Inventory.selected` 字段 | `setSelectedSlot()` / `getSelectedItem()` | 同左 |
+| 服务器目录 | `getServerDirectory()` 返回 `File` | 返回 `Path` | 返回 `Path` | 返回 `Path` |
 | 映射 | mojmap | mojmap | mojmap | **无映射（26.1+ 不再混淆）** |
 | Loom 插件 | `fabric-loom-remap` | `fabric-loom-remap` | `fabric-loom-remap` | **`fabric-loom`** |
 | 依赖配置 | `modImplementation` | `modImplementation` | `modImplementation` | **`implementation`** |
+
+> 注：`handleBlockBreakAction` / `useItemOn` 的签名在四个版本里**一致**，
+> 这正是「走原版输入通道」方案的好处 —— 核心执行逻辑几乎不用改。
 
 ---
 
 ## 12. 已知限制 / 后续可做
 
-* **寻路仍是 MVP 版**：`move` / `pathfind` 采用「直线靠近 + 落地校验」，
-  不做真实地形寻路，遇到山川河流会判定「无法到达」。
-  这是当前「打造帝国」最大的物理瓶颈，需要真正寻路可接入 Baritone。
-* **移动是瞬移而非行走**：`teleportTo` 直接落点，因此不会有真实行走动画、
-  也不会被地形阻挡。若需要「像真人一样走」，需改用逐 tick 的 `setDeltaMovement`。
-* **挖掘是瞬间完成**：`destroyBlock` 无视方块硬度与工具，不消耗耐久。
-* **假玩家同时只允许一个**（`FakePlayerManager` 单实例），简化设计。
-* **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 一个普通 `ServerPlayer`，
-  功能不受影响（所有执行器已按 `ServerPlayer` 编写），但若将来要覆写子类行为需注意。
-* **不会主动加载区块**：没有客户端，它所在区块若无其他玩家加载，
-  状态采集会跳过未加载的方块（代码已做 `isLoaded` 防护，不会报错）。
-* **LLM 输出解析**：已做「纯 JSON / 剥代码块 / 截取花括号」三重容错，
-  若模型仍频繁输出非 JSON，建议在 `StaticPrefix` 里强化格式约束（注意保持前缀稳定以免掉缓存命中率）。
+* **寻路是「直线走 + 卡住即失败」**：走路已经是真实物理（有重力、碰撞、会跳台阶），
+  但**不会绕路** —— 遇到墙会一直顶着直到超时。要做真正的绕障寻路需要接入 Baritone 或
+  自行实现 A*。这是目前唯一还算「不像真人」的地方：真人会绕开障碍。
+* **合成不等同于真人开界面**：假玩家没有客户端 GUI，合成是在服务端按真实配方规则结算的
+  （材料必须齐全、产物按配方给）。对结果而言与真人一致，但它不会"打开合成台"。
+* **假玩家同时只允许一个**（`FakePlayerManager` 单实例）。
+* **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 普通 `ServerPlayer`，
+  功能不受影响（所有执行器都按 `ServerPlayer` 编写）。
+* **不会主动加载区块**：没有客户端，所在区块若无其他玩家加载，
+  状态采集会跳过未加载方块（已做 `isLoaded` 防护）。
+* **LLM 输出解析**：已做三重容错；若模型频繁输出非 JSON，
+  建议强化 `StaticPrefix` 里的格式约束（注意保持前缀稳定以免掉缓存命中率）。

@@ -245,8 +245,15 @@ public final class AIBotCommand {
         if (parsed == null) {
             return fail(ctx, "无法解析为合法动作 JSON：" + json);
         }
-        ActionExecutor executor = new ActionExecutor(bot);
+        ActionExecutor executor = new ActionExecutor(bot, configStore.get());
         ActionExecutor.ActionResult result = executor.execute(parsed);
+
+        // 跨 tick 动作：交给自主循环的驱动器后续推进（即使 auto 未开启也会走完）
+        if (result.async()) {
+            autoLoop.adoptExternalAction(executor);
+            return ok(ctx, "动作已启动：" + result.message()
+                    + "\n（该动作需要若干 tick 完成，可用 /aibot status 查看进度）");
+        }
         return result.success()
                 ? ok(ctx, "执行成功：" + result.message())
                 : fail(ctx, "执行失败：" + result.message());

@@ -1,6 +1,7 @@
 package com.example.aibot.core;
 
 import com.example.aibot.action.ActionExecutor;
+import com.example.aibot.action.TickActionDriver;
 import com.example.aibot.action.ActionParser;
 import com.example.aibot.config.AIConfig;
 import com.example.aibot.entity.AIBotPlayer;
@@ -55,6 +56,8 @@ public final class AutoLoop {
         WAITING_FOR_LLM,
         /** 冷却中（避免请求过于密集）。 */
         COOLDOWN,
+        /** 正在执行一个跨 tick 的动作（走路/挖掘/放置/进食/攻击）。 */
+        EXECUTING,
         /** 已死亡，等待重生。 */
         DEAD_WAITING_RESPAWN
     }
@@ -100,6 +103,19 @@ public final class AutoLoop {
     /** 是否已被要求停止（/aibot auto off 时置位，阻止自动重启）。 */
     private final AtomicBoolean manualStop = new AtomicBoolean(false);
 
+    /**
+     * 当前正在进行的跨 tick 动作驱动器。
+     *
+     * <p>这是「像真人一样」的核心：走路/挖掘/放置/进食都通过它
+     * 逐 tick 走原版输入通道，而不是瞬间改世界。</p>
+     */
+    private volatile TickActionDriver activeDriver = null;
+
+    /** 当前动作对应的步号与动作名，用于动作完成后写记忆。 */
+    private long activeStep = 0;
+    private String activeActionName = "";
+    private String activeActionParams = "";
+
     public AutoLoop(AIConfig config,
                     CacheStats cacheStats,
                     LLMClient llmClient,
@@ -144,7 +160,13 @@ public final class AutoLoop {
             lastFeedback = "你刚刚死亡并已重生，请检查周围环境是否安全，优先确保生存。";
         }
 
-        // ============ 2. 步数上限（默认无限） ============
+        // ============ 2. 正在执行跨 tick 动作：先推进它 ============
+        if (phase == Phase.EXECUTING) {
+            tickActiveAction();
+            return;
+        }
+
+        // ============ 3. 步数上限（默认无限） ============
         if (config.maxStepsPerSession > 0
                 && stepCounter.get() >= config.maxStepsPerSession) {
             if (config.autoRestart && !manualStop.get()) {
@@ -158,17 +180,16 @@ public final class AutoLoop {
             return;
         }
 
-        // ============ 3. 生存反射（独立于 LLM 的安全网） ============
+        // ============ 4. 生存反射（独立于 LLM 的安全网） ============
         if (config.survivalReflex && phase != Phase.WAITING_FOR_LLM) {
             if (runSurvivalReflex()) {
-                // 反射动作已执行，本轮不再请求 LLM
-                phase = Phase.COOLDOWN;
-                tickCounter = config.decisionIntervalTicks;
+                // 反射动作已交给驱动器，进入执行阶段
+                phase = Phase.EXECUTING;
                 return;
             }
         }
 
-        // ============ 4. 常规决策节奏 ============
+        // ============ 5. 常规决策节奏 ============
         switch (phase) {
             case IDLE:
                 phase = Phase.COOLDOWN;
@@ -264,24 +285,24 @@ public final class AutoLoop {
 
             // 反射 1：血量极低 → 立即逃离
             if (health <= 6.0f) {
-                ActionExecutor executor = new ActionExecutor(bot);
+                ActionExecutor executor = new ActionExecutor(bot, config);
                 ActionParser.ParsedAction flee = ActionParser.fromParams("flee", "distance", 24.0);
                 ActionExecutor.ActionResult r = executor.execute(flee);
-                shortTermMemory.add(stepCounter.get(), "flee", "反射触发", r.success(),
-                        "血量过低(" + (int) health + ")自动逃跑");
-                LOGGER.info("[AIBot] 生存反射：血量 " + (int) health + " 过低，自动逃跑");
-                return true;
+                if (r.async()) {
+                    startActiveAction(executor, "flee", "反射触发", "血量过低(" + (int) health + ")自动逃跑");
+                    LOGGER.info("[AIBot] 生存反射：血量 " + (int) health + " 过低，开始逃跑");
+                    return true;
+                }
             }
 
-            // 反射 2：饥饿过低 → 自动进食
+            // 反射 2：饥饿过低 → 自动进食（走原版 startUsingItem，有 1.6 秒时长）
             if (food <= 6) {
-                ActionExecutor executor = new ActionExecutor(bot);
+                ActionExecutor executor = new ActionExecutor(bot, config);
                 ActionParser.ParsedAction eat = ActionParser.fromParams("eat", "item", "");
                 ActionExecutor.ActionResult r = executor.execute(eat);
-                if (r.success()) {
-                    shortTermMemory.add(stepCounter.get(), "eat", "反射触发", true,
-                            "饥饿值过低(" + food + ")自动进食");
-                    LOGGER.info("[AIBot] 生存反射：饥饿 " + food + " 过低，自动进食");
+                if (r.async()) {
+                    startActiveAction(executor, "eat", "反射触发", "饥饿值过低(" + food + ")自动进食");
+                    LOGGER.info("[AIBot] 生存反射：饥饿 " + food + " 过低，开始进食");
                     return true;
                 }
             }
@@ -289,6 +310,90 @@ public final class AutoLoop {
             LOGGER.log(Level.WARNING, "[AIBot] 生存反射执行异常", t);
         }
         return false;
+    }
+
+    // ------------------------------------------------------------------
+    // 跨 tick 动作的执行
+    // ------------------------------------------------------------------
+
+    /**
+     * 登记一个正在进行的跨 tick 动作。
+     *
+     * @param executor 执行器（持有驱动器）
+     * @param action   动作名
+     * @param params   参数摘要
+     * @param note     反馈给 LLM 的说明
+     */
+    private void startActiveAction(ActionExecutor executor, String action, String params, String note) {
+        this.activeDriver = executor.getDriver();
+        this.activeStep = stepCounter.get();
+        this.activeActionName = action;
+        this.activeActionParams = params;
+        this.lastFeedback = note;
+        this.phase = Phase.EXECUTING;
+    }
+
+    /**
+     * 接管一个由外部（如 /aibot do 命令）发起的跨 tick 动作。
+     *
+     * <p>用于调试：即使自主循环没开，手动触发的走路/挖掘也能被正常推进完成。</p>
+     */
+    public void adoptExternalAction(ActionExecutor executor) {
+        startActiveAction(executor, "manual", "命令触发", "手动执行的动作");
+    }
+
+    /**
+     * 推进当前跨 tick 动作，完成时写记忆并回到冷却。
+     *
+     * <p>这是「像真人一样」的关键：一个动作可能持续几十到几百 tick
+     * （走路几百 tick、挖黑曜石 188 tick、吃东西 32 tick），
+     * 期间不会发起新的 LLM 请求，也不会跳过时间。</p>
+     */
+    private void tickActiveAction() {
+        TickActionDriver driver = this.activeDriver;
+        if (driver == null) {
+            phase = Phase.COOLDOWN;
+            tickCounter = config.decisionIntervalTicks;
+            return;
+        }
+
+        driver.tick();
+
+        if (!driver.isDone()) {
+            return; // 还在进行中
+        }
+
+        // 动作结束：写记忆
+        boolean ok = driver.succeeded();
+        String msg = driver.result();
+        shortTermMemory.add(activeStep, activeActionName, activeActionParams, ok, msg);
+
+        if (ok) {
+            longTermMemory.recordSuccess(activeActionName, activeActionParams);
+            if (!plan.isEmpty()) {
+                plan.completeCurrent();
+            }
+        } else {
+            longTermMemory.recordFailure(activeActionName, activeActionParams, msg);
+            if (!plan.isEmpty()) {
+                boolean skipped = plan.failCurrent();
+                if (skipped) {
+                    LOGGER.warning("[AIBot] 任务连续失败过多，已跳过：" + activeActionName);
+                }
+            }
+        }
+        longTermMemory.save();
+
+        lastFeedback = "上一步 " + activeActionName + (ok ? " 成功：" : " 失败：") + msg;
+        LOGGER.info("[AIBot] 第 " + activeStep + " 步 " + activeActionName
+                + " -> " + (ok ? "成功" : "失败") + " (" + msg + ") 用时 "
+                + driver.getElapsedTicks() + " tick");
+
+        this.activeDriver = null;
+        this.activeActionName = "";
+        this.activeActionParams = "";
+        phase = Phase.COOLDOWN;
+        tickCounter = config.decisionIntervalTicks;
     }
 
     // ------------------------------------------------------------------
@@ -395,11 +500,21 @@ public final class AutoLoop {
                     return;
                 }
 
-                // 普通动作：统一用 ActionExecutor（已改为接受 ServerPlayer，
-                // 因此重生后的普通 ServerPlayer 实例也能正常驱动）
-                ActionExecutor executor = new ActionExecutor(player);
+                // 普通动作：统一用 ActionExecutor。
+                // 注意构造函数现在需要 config（TickActionDriver 用它读超时等配置）。
+                ActionExecutor executor = new ActionExecutor(player, config);
                 ActionExecutor.ActionResult result = executor.execute(parsed);
 
+                // 跨 tick 动作（走路/挖掘/放置/进食/攻击/拾取）：
+                // 只是"启动了"，真正完成要等若干 tick。这里登记后进入 EXECUTING，
+                // 由 tickActiveAction() 在动作真正结束时统一写记忆。
+                if (result.async()) {
+                    startActiveAction(executor, parsed.action(), parsed.paramsSummary(), result.message());
+                    LOGGER.info("[AIBot] 第 " + step + " 步启动 " + parsed.action() + "：" + result.message());
+                    return;
+                }
+
+                // 瞬时动作（合成/聊天/环顾/存储等）：直接结算
                 shortTermMemory.add(step, parsed.action(), parsed.paramsSummary(),
                         result.success(), result.message());
 
@@ -546,6 +661,12 @@ public final class AutoLoop {
     public void stop() {
         if (running.compareAndSet(true, false)) {
             manualStop.set(true);
+            // 取消正在进行的跨 tick 动作，避免残留输入让玩家一直走
+            TickActionDriver d = this.activeDriver;
+            if (d != null) {
+                d.cancel();
+                this.activeDriver = null;
+            }
             phase = Phase.IDLE;
             LOGGER.info("[AIBot] 自主循环已停止（本会话 " + stepCounter.get()
                     + " 步，累计 " + totalStepCounter.get() + " 步）");

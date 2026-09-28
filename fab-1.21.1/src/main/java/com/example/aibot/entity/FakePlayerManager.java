@@ -121,7 +121,7 @@ public final class FakePlayerManager {
         try {
             ServerPlayer fresh = server.getPlayerList().respawn(
                     old,
-                    true, // keepInventory: 保留物品栏，避免辛苦攒的资源一死全丢
+                    true,
                     net.minecraft.world.entity.Entity.RemovalReason.KILLED);
             if (fresh == null) {
                 LOGGER.warning("[AIBot] 重生失败：respawn 返回 null");
