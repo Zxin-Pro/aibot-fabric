@@ -21,7 +21,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 
 /**
- * AIBot 主入口（Minecraft 1.21.11 版本线）。
+ * AIBot 主入口（Minecraft 26.3 版本线，多智能体版）。
  *
  * <p>负责组装所有模块并注册事件：</p>
  * <ul>
@@ -97,7 +97,7 @@ public class Aibot implements ModInitializer {
     @Override
     public void onInitialize() {
         instance = this;
-        LOGGER.info("[AIBot] 正在初始化（多智能体版，Minecraft 1.21.11 版本线）...");
+        LOGGER.info("[AIBot] 正在初始化（Minecraft 26.3 版本线，多智能体版）...");
 
         // 1. 服务器生命周期：配置与记忆的路径依赖服务器工作目录，必须等启动完成
         ServerLifecycleEvents.SERVER_STARTED.register(this::onServerStarted);
@@ -131,7 +131,6 @@ public class Aibot implements ModInitializer {
         if (warning != null) {
             LOGGER.warn("[AIBot] 提示词静态前缀自检警告: {}", warning);
         }
-        // 打印指纹，便于确认前缀未被改动（改动会降低缓存命中率）
         LOGGER.info("[AIBot] 提示词静态前缀指纹: {}", PromptBuilder.staticFingerprint());
 
         LOGGER.info("[AIBot] 初始化完成。使用 /aibot spawn [名字] 生成智能体；"
@@ -144,8 +143,9 @@ public class Aibot implements ModInitializer {
     private void onServerStarted(MinecraftServer server) {
         this.server = server;
         try {
-            // 服务器工作目录（单人存档目录 / 服务端根目录）
-            // 注意：1.21.11 的 getServerDirectory() 直接返回 Path（1.20.1 返回 File，需要 .toPath()）
+            // 服务器工作目录（单人存档目录 / 服务端根目录）。
+            // 26.3 的 MinecraftServer.getServerDirectory() 直接返回 Path（不再是 File），
+            // 所以这里不需要再 .toPath()。这与本模块原有写法一致。
             Path gameDir = server.getServerDirectory();
 
             this.configStore = new ConfigStore(gameDir);
@@ -176,6 +176,9 @@ public class Aibot implements ModInitializer {
             LOGGER.info("[AIBot] 上下文压缩：窗口 {} 条，预算 {} token",
                     config.contextWindow, config.contextTokenBudget);
             LOGGER.info("[AIBot] 智能体上限：{} 个", config.maxBots);
+            LOGGER.info("[AIBot] 自主模式：{}，spawn 后自动开始：{}",
+                    config.autonomousMode ? "开启（无人干预时自主游玩）" : "关闭",
+                    config.autoStartOnSpawn ? "是" : "否");
 
             LOGGER.warn("[AIBot] 提醒：智能体会自动修改世界，长期挂机前请务必备份存档！");
 
@@ -215,13 +218,10 @@ public class Aibot implements ModInitializer {
      * <p>用 Fabric 的 {@code ServerMessageEvents.CHAT_MESSAGE}，
      * 它会在消息广播时触发，覆盖普通聊天与 /say 等命令发言。</p>
      *
-     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：fabric-message-api-v1
-     * 在 1.21.1 上是 7.0.10，其 {@code ChatMessage} 函数式接口签名是
-     * {@code (PlayerChatMessage, ServerPlayer, ChatType.Bound)} ——
-     * 与 1.20.1 完全一致，因此这段代码两个模块可以逐字相同。
-     * 且 1.21.11 的 {@code PlayerChatMessage.signedContent()} 依然存在
-     * （内部委托给 {@code signedBody().content()}），会返回玩家输入的原文
-     * （未加聊天装饰，也未包含 &lt;名字&gt; 前缀），正是我们需要的。</p>
+     * <p><b>26.3 说明</b>：已用 javap 在 fabric-message-api-v1 与
+     * minecraft-merged-deobf-26.3.jar 上核实，26.3 的回调签名仍是
+     * {@code onChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)}，
+     * 取文本仍然用 {@code message.signedContent()}，与 1.20.1 完全一致。</p>
      *
      * <p>注意：智能体自己发的话也会进这里，但
      * {@link MultiBotManager#hearChat} 会按说话者名字把自己过滤掉，
@@ -236,8 +236,6 @@ public class Aibot implements ModInitializer {
                         }
                         try {
                             String speaker = sender.getName().getString();
-                            // 直接取签名正文的纯文本；不要用 decoratedContent()，
-                            // 那会把 <名字> 前缀和聊天样式一并带进来。
                             String text = message.signedContent();
                             // 步号只用于让模型判断新旧，取当前最大值即可
                             this.botManager.hearChat(speaker, text, this.tickCounter);
@@ -254,9 +252,6 @@ public class Aibot implements ModInitializer {
 
     /**
      * tick 开始：推进所有智能体。
-     *
-     * <p>必须在玩家实体 tick <b>之前</b>设置移动输入，
-     * 否则假玩家会比真人慢一拍（详见 onInitialize 里的说明）。</p>
      */
     private void onServerTickStart(MinecraftServer server) {
         this.server = server;

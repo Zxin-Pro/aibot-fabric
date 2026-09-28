@@ -893,7 +893,7 @@ public final class TickActionDriver {
         bot.setYHeadRot(yaw);
         bot.zza = MOVE_FORWARD;
         bot.xxa = 0.0f;
-        if (shouldJumpToward(bot.level(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
+        if (shouldJumpToward((ServerLevel) bot.level(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
             bot.setJumping(true);
         }
     }

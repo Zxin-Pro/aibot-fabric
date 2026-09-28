@@ -555,7 +555,7 @@ public class ActionExecutor {
         try {
             var result = bot.startSleepInBed(bedPos);
             if (result.left().isPresent()) {
-                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
+                return ActionResult.fail("无法入睡：" + result.left().get().name());
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {

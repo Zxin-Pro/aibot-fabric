@@ -77,15 +77,15 @@ public class AIBotPlayer extends ServerPlayer {
      * 纯离线服务器上没有皮肤服务，任何名字都是默认皮肤（Steve/Alex），
      * 这是原版机制限制，不是模组的问题。</p>
      *
-     * <p><b>1.21.11 版本差异</b>：{@code ServerPlayer} 构造是 <b>4 参数</b>
-     * （{@code MinecraftServer, ServerLevel, GameProfile, ClientInformation}），
-     * 比 1.20.1 多一个客户端信息；且 GameProfile 这里仍然是 2 参数构造，
-     * 属性表（含皮肤 textures）不做伪造签名 —— 那属于伪造正版身份，不做。</p>
+     * <p><b>26.3 注意事项</b>：{@code GameProfile} 依然只有 2 参数构造
+     * （uuid, name），属性表（含皮肤 textures）要用
+     * {@code getProperties().put(...)} 事后填。这里<b>不</b>伪造 textures 签名
+     * —— 那属于伪造正版身份，不做。</p>
      *
      * @param server    服务器实例
      * @param level     目标世界
      * @param name      玩家名（同时决定 UUID，必须唯一）
-     * @param skinOwner 皮肤归属名；当前仅作展示/档案用途，不伪造 textures
+     * @param skinOwner 皮肤归属名；为空则用 name
      */
     public AIBotPlayer(MinecraftServer server, ServerLevel level, String name, String skinOwner) {
         super(server, level, new GameProfile(offlineUuid(name), name), ClientInformation.createDefault());
@@ -99,6 +99,16 @@ public class AIBotPlayer extends ServerPlayer {
                 this.networkConnection,
                 this,
                 this.cookie);
+        // 皮肤归属名记录在字段里，供需要时查询（离线模式下拿不到 textures）。
+        this.skinOwner = skinOwner == null || skinOwner.trim().isEmpty() ? name : skinOwner.trim();
+    }
+
+    /** 皮肤归属名（正版服务器会按它查皮肤）。 */
+    private final String skinOwner;
+
+    /** 取皮肤归属名。 */
+    public String getSkinOwner() {
+        return this.skinOwner;
     }
 
     /** placeNewPlayer 需要与连接相匹配的 cookie。 */

@@ -148,7 +148,7 @@ public final class MultiBotManager {
             // 生成位置：自定义坐标优先，否则用世界重生点。
             // 1.21.11 用 getRespawnData().pos()，旧版本是 getSharedSpawnPos()。
             if (profile.spawnAtWorldSpawn) {
-                var spawnPos = overworld.getRespawnData().pos();
+                var spawnPos = overworld.getSharedSpawnPos(); // 1.21.8 尚无 getRespawnData()
                 bot.setPos(spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5);
             } else {
                 bot.setPos(profile.spawnX, profile.spawnY, profile.spawnZ);

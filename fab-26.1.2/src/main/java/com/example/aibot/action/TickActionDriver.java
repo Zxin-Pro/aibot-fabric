@@ -348,7 +348,7 @@ public final class TickActionDriver {
             return;
         }
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         Vec3 pos = bot.position();
 
         double dx = walkTarget.x - pos.x;
@@ -509,7 +509,7 @@ public final class TickActionDriver {
 
         clearMovementInput();
         lookAtBlock(target);
-        bot.swing(InteractionHand.MAIN_HAND);
+        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
 
         // 走原版挖掘流程（会按硬度耗时）
         bot.gameMode.handleBlockBreakAction(
@@ -548,7 +548,7 @@ public final class TickActionDriver {
             return false;
         }
         if (slot < 9) {
-            bot.getInventory().selected = slot;
+            bot.getInventory().setSelectedSlot(slot);
         }
 
         // 站近一点再放
@@ -577,9 +577,9 @@ public final class TickActionDriver {
 
         Vec3 hitVec = new Vec3(against.getX() + 0.5, against.getY() + 0.5, against.getZ() + 0.5);
         BlockHitResult hit = new BlockHitResult(hitVec, face, against, false);
-        ItemStack held = bot.getInventory().getSelected();
+        ItemStack held = bot.getInventory().getSelectedItem();
         bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
-        bot.swing(InteractionHand.MAIN_HAND, true);
+        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
 
         // 下一 tick 用实际方块状态判定是否成功
         if (!level.getBlockState(target).isAir() && !level.getBlockState(target).canBeReplaced()) {
@@ -640,8 +640,8 @@ public final class TickActionDriver {
         BlockPos front = BlockPos.containing(ahead.x, pos.y, ahead.z);
         BlockState frontState = level.getBlockState(front);
         BlockState frontUp = level.getBlockState(front.above());
-        boolean blocked = !frontState.isAir() && frontState.isSolidRender(bot.serverLevel(), front);
-        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender(bot.serverLevel(), front.above());
+        boolean blocked = !frontState.isAir() && frontState.isSolidRender();
+        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender();
         return blocked && canPass && bot.onGround();
     }
 
@@ -661,7 +661,7 @@ public final class TickActionDriver {
      * @return true 表示已经朝安全方向施加了移动输入
      */
     public boolean avoidDanger() {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         BlockPos feet = bot.blockPosition();
 
         for (int dx = -1; dx <= 1; dx++) {
@@ -715,7 +715,7 @@ public final class TickActionDriver {
      * @return true 表示正在前往掉落物
      */
     public boolean tryPickupNearby() {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         AABB box = bot.getBoundingBox().inflate(4.0);
         var items = level.getEntities(bot, box,
                 e -> e instanceof net.minecraft.world.entity.item.ItemEntity && e.isAlive());
@@ -738,7 +738,7 @@ public final class TickActionDriver {
      */
     public boolean isToolAboutToBreak() {
         try {
-            ItemStack held = bot.getInventory().getSelected();
+            ItemStack held = bot.getInventory().getSelectedItem();
             if (held.isEmpty() || !held.isDamageableItem()) {
                 return false;
             }
@@ -803,12 +803,12 @@ public final class TickActionDriver {
         }
 
         if (bestSlot >= 0) {
-            inv.selected = bestSlot;
+            inv.setSelectedSlot(bestSlot);
         }
     }
 
     private void tickMine() {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
 
         if (mineTarget == null || targetBlock == null) {
             fail("没有挖掘目标");
@@ -859,7 +859,7 @@ public final class TickActionDriver {
 
         // 面朝方块（真人挖矿也会看着它）
         lookAtBlock(mineTarget);
-        bot.swing(InteractionHand.MAIN_HAND, true);
+        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
 
         // 原版挖掘：第一次发 START，之后每 tick 发 STOP 继续累积进度
         // 这正是真人客户端持续按住左键时做的事情。
@@ -893,7 +893,7 @@ public final class TickActionDriver {
         bot.setYHeadRot(yaw);
         bot.zza = MOVE_FORWARD;
         bot.xxa = 0.0f;
-        if (shouldJumpToward(bot.serverLevel(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
+        if (shouldJumpToward(bot.level(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
             bot.setJumping(true);
         }
     }
@@ -940,7 +940,7 @@ public final class TickActionDriver {
             return;
         }
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
 
         // 已经放好了（原版放置成功后状态会变）
         BlockState now = level.getBlockState(placePos);
@@ -957,7 +957,7 @@ public final class TickActionDriver {
         }
         // 切到对应快捷栏槽位（等价于真人滚轮/数字键切换）
         if (slot < 9) {
-            bot.getInventory().selected = slot;
+            bot.getInventory().setSelectedSlot(slot);
         }
 
         // 站到能碰到目标的位置
@@ -987,10 +987,10 @@ public final class TickActionDriver {
         Vec3 hitVec = new Vec3(against.getX() + 0.5, against.getY() + 0.5, against.getZ() + 0.5);
         BlockHitResult hit = new BlockHitResult(hitVec, face, against, false);
 
-        ItemStack held = bot.getInventory().getSelected();
+        ItemStack held = bot.getInventory().getSelectedItem();
         // 原版放置入口：会做朝向、碰撞、可替换性等全部校验
         var result = bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
-        bot.swing(InteractionHand.MAIN_HAND);
+        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
 
         if (result.consumesAction() || level.getBlockState(placePos).is(placeBlock)) {
             // 成功与否下一 tick 用实际方块状态判定
@@ -1032,10 +1032,10 @@ public final class TickActionDriver {
 
         // 切到手上
         if (slot < 9) {
-            bot.getInventory().selected = slot;
+            bot.getInventory().setSelectedSlot(slot);
         }
 
-        ItemStack stack = bot.getInventory().getSelected();
+        ItemStack stack = bot.getInventory().getSelectedItem();
         // 必须是食物才能 startUsingItem
         if (!isFood(stack)) {
             fail("选中的物品不是食物: " + shortId(String.valueOf(
@@ -1062,7 +1062,7 @@ public final class TickActionDriver {
     // ------------------------------------------------------------------
 
     private void tickAttack() {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
 
         // 原版攻击冷却：真人必须等冷却条满才能打出满伤害
         float cooldown = bot.getAttackStrengthScale(0.5f);
@@ -1100,7 +1100,7 @@ public final class TickActionDriver {
 
         // 面朝目标
         lookAtBlock(victim.blockPosition());
-        bot.swing(InteractionHand.MAIN_HAND);
+        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
 
         // 走原版攻击路径：会计算伤害、击退、暴击、冷却倍率
         bot.attack(victim);
@@ -1114,7 +1114,7 @@ public final class TickActionDriver {
     // ------------------------------------------------------------------
 
     private void tickPickup() {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         AABB box = bot.getBoundingBox().inflate(8.0);
         List<Entity> items = level.getEntities(bot, box,
                 e -> e instanceof net.minecraft.world.entity.item.ItemEntity && e.isAlive());

@@ -20,7 +20,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 多智能体管理器：同时运行任意数量的 AIBot（Minecraft 1.21.11 实现）。
+ * 多智能体管理器：同时运行任意数量的 AIBot（Minecraft 26.3 实现）。
  *
  * <p><b>设计要点（这也是「和真人没区别」的关键）</b>：每个智能体都是一个
  * 独立的 {@link ServerPlayer} 实体，拥有：</p>
@@ -38,15 +38,15 @@ import java.util.logging.Logger;
  *
  * <p>用 {@link LinkedHashMap} 保存，保证 tick 顺序与列表输出顺序稳定。</p>
  *
- * <p><b>1.20.1 ↔ 1.21.11 版本差异（务必对照其他模块）</b>：</p>
+ * <p><b>26.3 版本差异（务必对照 1.20.1 / 1.21.x 模块）</b>：</p>
  * <ul>
- *   <li>{@code placeNewPlayer} 在 1.21.11 是
- *       {@code (Connection, ServerPlayer, CommonListenerCookie)} <b>3 参数</b>，
- *       比 1.20.1 多一个 CommonListenerCookie；cookie 必须与构造
- *       {@code ServerGamePacketListenerImpl} 时用的是同一个对象。</li>
- *   <li>{@code PlayerList.respawn} 在 1.21.11 是
- *       {@code (ServerPlayer, boolean, Entity.RemovalReason)} <b>3 参数</b>，
- *       1.20.1 只有 2 参数（1.21.11 多出的 RemovalReason 必须传 KILLED）。</li>
+ *   <li>生成位置：26.x 没有 {@code getSharedSpawnPos()}，改用
+ *       {@code overworld.getRespawnData().pos()} —— 这与本模块原
+ *       {@code FakePlayerManager} 的做法完全一致，是 26.x 的正确写法。</li>
+ *   <li>入服：{@code PlayerList.placeNewPlayer(Connection, ServerPlayer, CommonListenerCookie)}
+ *       是 3 参数，必须把 cookie 一起传进去。</li>
+ *   <li>重生：{@code PlayerList.respawn(ServerPlayer, boolean, RemovalReason)}
+ *       是 3 参数，第三个参数给 {@code KILLED}，语义与真人死亡重生一致。</li>
  * </ul>
  */
 public final class MultiBotManager {
@@ -65,7 +65,7 @@ public final class MultiBotManager {
         public final ShortTermMemory shortTermMemory = new ShortTermMemory();
         public final LongTermMemory longTermMemory;
         public final LandmarkMemory landmarkMemory;
-        /** 本智能体听到的聊天（玩家发言）。每个 bot 一份，互不干扰。 */
+        /** 听到的聊天：让智能体能回应别人，而不是自顾自干活。 */
         public final com.example.aibot.memory.ChatMemory chatMemory = new com.example.aibot.memory.ChatMemory();
 
         Agent(BotProfile profile, LongTermMemory ltm, LandmarkMemory lm, AutoLoop loop) {
@@ -144,13 +144,15 @@ public final class MultiBotManager {
 
         try {
             ServerLevel overworld = server.overworld();
-            // 版本差异点：AIBotPlayer 在 1.21.11 内部会自己建 CommonListenerCookie，
-            // 因此 spawn 这里不需要额外传参（1.20.1 亦然，签名保持一致）。
+            // 26.3：GameProfile(uuid, name) 仍是 2 参数构造，属性表（含皮肤 textures）
+            // 用 getProperties().put(...) 事后填。这里不伪造 textures 签名 ——
+            // 那属于伪造正版身份，不做。
             AIBotPlayer bot = new AIBotPlayer(server, overworld, name, profile.resolvedSkinOwner());
 
-            // 生成位置：自定义坐标优先，否则用世界重生点
+            // 生成位置：自定义坐标优先，否则用世界重生点。
+            // 26.3 用 getRespawnData().pos()（旧版本是 getSharedSpawnPos()）。
             if (profile.spawnAtWorldSpawn) {
-                var spawnPos = overworld.getSharedSpawnPos();
+                var spawnPos = overworld.getRespawnData().pos();
                 bot.setPos(spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5);
             } else {
                 bot.setPos(profile.spawnX, profile.spawnY, profile.spawnZ);
@@ -160,9 +162,8 @@ public final class MultiBotManager {
 
             // 注册进玩家列表 —— 这一步才让它真正「入服」：
             // 有 TAB 条目、能被渲染、能收发聊天、能被其他玩家看见。
-            //
-            // 【版本差异】1.21.11 的 placeNewPlayer 必须带上与构造连接时
-            // 同一个 CommonListenerCookie，否则客户端会收到不一致的登录信息。
+            // 注意参数类型：第一个参数要原始 Connection（不是 connection 字段，
+            // 那个是 ServerGamePacketListenerImpl）；第三个是同一个登录 cookie。
             server.getPlayerList().placeNewPlayer(
                     bot.getNetworkConnection(), bot, bot.createCookie());
 
@@ -180,7 +181,10 @@ public final class MultiBotManager {
             AutoLoop loop = new AutoLoop(config, cacheStats, llmClient, this,
                     agent.shortTermMemory, ltm, lm, profile, agent.chatMemory);
             agent.loop = loop;
-            loop.restorePlan(ltm.loadPlan());
+            // 恢复上次保存的计划，让服务器重启后能接着做
+            if (config.persistPlan) {
+                loop.restorePlan(ltm.loadPlan());
+            }
             // 目标优先级：档案里保存的 > 配置里的默认目标 > 空（自行决定）
             String effectiveGoal = profile.goal;
             if (effectiveGoal == null || effectiveGoal.trim().isEmpty()) {
@@ -265,11 +269,6 @@ public final class MultiBotManager {
      * 把我们的 {@link AIBotPlayer} 子类实例丢掉。所以重生后必须更新引用，
      * 否则后续所有操作都会打在已死亡的旧对象上。</p>
      *
-     * <p><b>1.21.11 版本差异</b>：{@code respawn} 是 3 参数，
-     * 比 1.20.1 多一个 {@code Entity.RemovalReason}。这里必须传
-     * {@code KILLED}：它决定旧实体的移除方式（KILLED 才会正确触发
-     * 死亡掉落与统计，传 CHANGED_DIMENSION 之类的值会留下幽灵实体）。</p>
-     *
      * @return 重生后的玩家；失败返回 null
      */
     public ServerPlayer respawn(MinecraftServer server, String name) {
@@ -282,10 +281,11 @@ public final class MultiBotManager {
             return null;
         }
         try {
+            // 26.3：respawn 是 3 参数，第三个是移除原因。
+            // 用 KILLED 与真人死亡重生走同一条路径；keepInventory=true 保留物品栏，
+            // 避免辛苦攒的资源一死全丢。
             ServerPlayer fresh = server.getPlayerList().respawn(
-                    old,
-                    true,
-                    net.minecraft.world.entity.Entity.RemovalReason.KILLED);
+                    old, true, net.minecraft.world.entity.Entity.RemovalReason.KILLED);
             if (fresh == null) {
                 LOGGER.warning("[AIBot] " + name + " 重生失败：respawn 返回 null");
                 return null;
@@ -408,7 +408,9 @@ public final class MultiBotManager {
             try {
                 a.loop.stop();
                 a.longTermMemory.save();
-                a.longTermMemory.savePlan(a.loop.getPlan());
+                if (config == null || config.persistPlan) {
+                    a.longTermMemory.savePlan(a.loop.getPlan());
+                }
                 a.landmarkMemory.save();
             } catch (Throwable t) {
                 LOGGER.log(Level.WARNING, "[AIBot] 关闭时保存 " + a.name() + " 数据失败", t);

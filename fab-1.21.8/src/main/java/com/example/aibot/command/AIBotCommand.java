@@ -93,11 +93,7 @@ public final class AIBotCommand {
                          CommandBuildContext buildContext,
                          Commands.CommandSelection selection) {
         dispatcher.register(Commands.literal("aibot")
-                // 需要 OP 权限。
-                // 注意 1.21.11+/26.x 的 API 变更：旧的 src.hasPermission(2) 已移除，
-                // 现在通过 permissions().hasPermission(Permission) 判断。
-                .requires(src -> src.permissions()
-                        .hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_MODERATOR))
+                .requires(src -> src.hasPermission(2))
 
                 // ---- spawn [名字] ----
                 .then(Commands.literal("spawn")

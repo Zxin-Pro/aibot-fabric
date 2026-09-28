@@ -3,7 +3,7 @@ package com.example.aibot.action;
 import com.example.aibot.config.AIConfig;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -176,7 +176,7 @@ public class ActionExecutor {
     /** 逃离威胁：朝远离威胁的方向走。 */
     protected ActionResult flee(ActionParser.ParsedAction parsed) {
         double distance = parsed.getDouble("distance", 16.0);
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
 
         AABB box = bot.getBoundingBox().inflate(16.0);
         List<Entity> threats = level.getEntities(bot, box, e -> e instanceof Monster && e.isAlive());
@@ -224,7 +224,7 @@ public class ActionExecutor {
             return ActionResult.fail("未知方块: " + blockId);
         }
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         BlockPos pos = findNearestBlock(level, target, 24);
         if (pos == null) {
             return ActionResult.fail("附近 24 格内找不到 " + shortId(blockId));
@@ -258,7 +258,7 @@ public class ActionExecutor {
         int dz = parsed.getInt("z", 0);
         BlockPos pos = base.offset(dx, dy, dz);
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         if (!level.isLoaded(pos)) {
             return ActionResult.fail("目标位置所在区块未加载");
         }
@@ -291,25 +291,25 @@ public class ActionExecutor {
         }
 
         String full = itemId.contains(":") ? itemId : "minecraft:" + itemId;
-        ResourceLocation key = ResourceLocation.tryParse(full);
+        Identifier key = Identifier.parse(full);
         if (key == null) {
             return ActionResult.fail("非法物品 ID: " + itemId);
         }
-        net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.get(key);
+        net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.getValue(key);
         if (targetItem == null || targetItem == Items.AIR) {
             return ActionResult.fail("未知物品: " + itemId);
         }
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         var recipes = level.getServer().getRecipeManager();
-        // 1.21.1 没有 RecipeDisplay 体系
+        var ctx = net.minecraft.world.item.crafting.display.SlotDisplayContext.fromLevel(level);
 
         net.minecraft.world.item.crafting.RecipeHolder<?> matchedRecipe = null;
         ItemStack matchedResult = ItemStack.EMPTY;
         boolean recipeExists = false;
 
         for (var holder : recipes.getRecipes()) {
-            ItemStack result = holder.value().getResultItem(level.registryAccess());
+            ItemStack result = resultOf(holder.value(), ctx);
             if (result.isEmpty() || !result.is(targetItem)) {
                 continue;
             }
@@ -336,7 +336,7 @@ public class ActionExecutor {
             ItemStack out = matchedResult.copy();
             out.setCount(batch);
             if (!bot.getInventory().add(out)) {
-                bot.drop(out, false);
+                bot.drop(out, false, net.minecraft.util.Prediction.SERVER_ONLY);
             }
             total -= batch;
         }
@@ -345,10 +345,32 @@ public class ActionExecutor {
                 + "（共 " + (perCraft * count) + " 个）");
     }
 
-    
+    /** 取配方产物（1.21.11 的 RecipeDisplay 体系）。 */
+    protected ItemStack resultOf(net.minecraft.world.item.crafting.Recipe<?> recipe,
+                                 net.minecraft.util.context.ContextMap ctx) {
+        try {
+            var displays = recipe.display();
+            if (displays == null || displays.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            var slot = displays.get(0).result();
+            if (slot == null) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack s = slot.resolveForFirstStack(ctx);
+            return s == null ? ItemStack.EMPTY : s;
+        } catch (Throwable t) {
+            return ItemStack.EMPTY;
+        }
+    }
+
     protected boolean hasIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
-            var ingredients = recipe.getIngredients();
+            var info = recipe.placementInfo();
+            if (info == null) {
+                return false;
+            }
+            var ingredients = info.ingredients();
             if (ingredients == null || ingredients.isEmpty()) {
                 return false;
             }
@@ -379,8 +401,12 @@ public class ActionExecutor {
 
     protected void consumeIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
+            var info = recipe.placementInfo();
+            if (info == null) {
+                return;
+            }
             var inv = bot.getInventory();
-            for (var ing : recipe.getIngredients()) {
+            for (var ing : info.ingredients()) {
                 if (ing == null || ing.isEmpty()) {
                     continue;
                 }
@@ -433,12 +459,6 @@ public class ActionExecutor {
      * 游戏里显示成黄色斜体，且<b>不带玩家名牌、不进聊天记录、其他插件也读不到</b>。
      * 真人说话走的是聊天通道，所以这里用 {@code ChatType} 广播，
      * 让它和真人发言在客户端呈现上完全一致。</p>
-     *
-     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：
-     * {@code PlayerList.broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)}
-     * 与 1.20.1 完全相同；{@code PlayerChatMessage.unsigned(UUID, String)} 与
-     * {@code ChatType.bind(ResourceKey, Entity)} 在 1.21.11 上也依然存在。
-     * 也就是说这一处两个模块可以逐字相同 —— 不要凭印象改动。</p>
      */
     protected ActionResult chat(ActionParser.ParsedAction parsed) {
         String message = parsed.getString("message", "");
@@ -451,21 +471,22 @@ public class ActionExecutor {
         }
         try {
             // 用原版聊天广播：与真人发言走同一条渲染路径
-            //（有玩家名牌、进聊天记录、其他插件能监听到 PlayerChatEvent）。
+            //（有玩家名牌、进聊天记录、其他插件能监听到）。
             //
-            // 签名：broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)
-            // 其中用 unsigned 构造表示「未签名」——
+            // 26.3 签名（已用 javap 在 minecraft-merged-deobf-26.3.jar 上核实）：
+            //   PlayerList.broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)
+            // 其中 unsigned(...) 表示「未签名」——
             // 这在离线/伪造连接下是正确做法（我们没有 Mojang 的会话密钥，
             // 也不应该伪造正版签名）。
             // ChatType.bind(key, entity) 内部会去 registry 查 ChatType 再绑定发送者，
-            // 这是最省事且语义正确的用法。
+            // 这是 26.x 里最省事且语义正确的用法。
             net.minecraft.network.chat.ChatType.Bound bound =
                     net.minecraft.network.chat.ChatType.bind(
                             net.minecraft.network.chat.ChatType.CHAT,
                             bot);
             net.minecraft.network.chat.PlayerChatMessage msg =
                     net.minecraft.network.chat.PlayerChatMessage.unsigned(bot.getUUID(), text);
-            bot.serverLevel().getServer().getPlayerList()
+            bot.level().getServer().getPlayerList()
                     .broadcastChatMessage(msg, bot, bound);
             return ActionResult.ok("说了: " + text);
         } catch (Throwable t) {
@@ -480,10 +501,6 @@ public class ActionExecutor {
      *
      * <p>原来的实现直接把 yaw/pitch 设为 0 —— 那会在一 tick 内把头猛转 180 度，
      * 真人的鼠标不可能这样。这里改为在当前朝向附近做小幅随机扫视。</p>
-     *
-     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：
-     * {@code ServerGamePacketListenerImpl.teleport(double, double, double, float, float)}
-     * 在 1.21.11 上依然存在，因此 {@code bot.connection.teleport(...)} 可用。</p>
      */
     protected ActionResult look(ActionParser.ParsedAction parsed) {
         float curYaw = bot.getYRot();
@@ -494,7 +511,9 @@ public class ActionExecutor {
         newPitch = Math.max(-60.0f, Math.min(60.0f, newPitch));
         bot.setYRot(newYaw % 360.0f);
         bot.setXRot(newPitch);
-        // 同步给客户端，否则其他玩家看到的是旧朝向
+        // 同步给客户端，否则其他玩家看到的是旧朝向。
+        // 26.3 的 ServerGamePacketListenerImpl.teleport(double,double,double,float,float)
+        // 与旧版本一致（已用 javap 核实）。
         bot.connection.teleport(bot.getX(), bot.getY(), bot.getZ(),
                 bot.getYRot(), bot.getXRot());
         return ActionResult.ok("环顾四周完成");
@@ -502,8 +521,8 @@ public class ActionExecutor {
 
     /** 睡觉：需要夜晚且有床（走原版 startSleepInBed）。 */
     protected ActionResult sleep(ActionParser.ParsedAction parsed) {
-        ServerLevel level = bot.serverLevel();
-        long dayTime = level.getDayTime() % 24000L;
+        ServerLevel level = bot.level();
+        long dayTime = level.getOverworldClockTime() % 24000L;
         if (dayTime < 13000L) {
             return ActionResult.fail("现在是白天，无法睡觉");
         }
@@ -513,12 +532,12 @@ public class ActionExecutor {
             bedPos = BlockPos.containing(parsed.getDouble("x", 0),
                     parsed.getDouble("y", 0), parsed.getDouble("z", 0));
             if (!(level.getBlockState(bedPos).getBlock()
-                    instanceof net.minecraft.world.level.block.BedBlock)) {
+                    instanceof net.minecraft.world.level.block.AbstractBedBlock)) {
                 bedPos = null;
             }
         }
         if (bedPos == null) {
-            bedPos = findNearestBlockOfType(level, net.minecraft.world.level.block.BedBlock.class, 24);
+            bedPos = findNearestBlockOfType(level, net.minecraft.world.level.block.AbstractBedBlock.class, 24);
             if (bedPos == null) {
                 return ActionResult.fail("附近 24 格内找不到床");
             }
@@ -533,9 +552,14 @@ public class ActionExecutor {
         }
 
         try {
-            var result = bot.startSleepInBed(bedPos);
+            // 26.3 的 startSleepInBed 需要 (床方块, 床状态, BedRule, 坐标)
+            net.minecraft.world.level.block.state.BlockState bedState = level.getBlockState(bedPos);
+            var bedBlock = (net.minecraft.world.level.block.AbstractBedBlock) bedState.getBlock();
+            net.minecraft.world.attribute.BedRule rule = bedBlock.getBedRule(level, bedPos);
+
+            var result = bot.startSleepInBed(bedBlock, bedState, rule, bedPos);
             if (result.left().isPresent()) {
-                return ActionResult.fail("无法入睡：" + result.left().get().name());
+                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {
@@ -549,7 +573,7 @@ public class ActionExecutor {
         if (playerName.isEmpty()) {
             return ActionResult.fail("follow 动作缺少 player 参数");
         }
-        for (var p : bot.serverLevel().players()) {
+        for (var p : bot.level().players()) {
             if (p.getName().getString().equalsIgnoreCase(playerName)) {
                 double dist = p.distanceTo(bot);
                 driver.beginWalk(p.position(), (int) Math.max(200, dist / 0.215 * 3));
@@ -566,7 +590,7 @@ public class ActionExecutor {
      */
     protected ActionResult store(ActionParser.ParsedAction parsed) {
         String wanted = parsed.getString("item", "");
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
 
         net.minecraft.world.Container container = findNearestContainer(level, 6);
         if (container == null) {
@@ -584,7 +608,7 @@ public class ActionExecutor {
                 continue;
             }
             if (!wanted.isEmpty()) {
-                ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
+                Identifier key = BuiltInRegistries.ITEM.getKey(stack.getItem());
                 if (key == null || (!key.toString().equals(wanted)
                         && !key.toString().equals("minecraft:" + wanted))) {
                     continue;
@@ -728,11 +752,11 @@ public class ActionExecutor {
     /** 按注册 ID 解析方块。 */
     protected Block resolveBlock(String id) {
         String full = id.contains(":") ? id : "minecraft:" + id;
-        ResourceLocation key = ResourceLocation.tryParse(full);
+        Identifier key = Identifier.parse(full);
         if (key == null) {
             return null;
         }
-        Block b = BuiltInRegistries.BLOCK.get(key);
+        Block b = BuiltInRegistries.BLOCK.getValue(key);
         return b == null || b == Blocks.AIR ? null : b;
     }
 
