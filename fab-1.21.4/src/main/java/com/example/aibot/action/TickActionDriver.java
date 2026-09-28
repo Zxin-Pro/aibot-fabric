@@ -548,7 +548,7 @@ public final class TickActionDriver {
             return false;
         }
         if (slot < 9) {
-            bot.getInventory().setSelectedSlot(slot);
+            bot.getInventory().selected = slot;
         }
 
         // 站近一点再放
@@ -577,7 +577,7 @@ public final class TickActionDriver {
 
         Vec3 hitVec = new Vec3(against.getX() + 0.5, against.getY() + 0.5, against.getZ() + 0.5);
         BlockHitResult hit = new BlockHitResult(hitVec, face, against, false);
-        ItemStack held = bot.getInventory().getSelectedItem();
+        ItemStack held = bot.getInventory().getSelected();
         bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
         bot.swing(InteractionHand.MAIN_HAND, true);
 
@@ -640,8 +640,8 @@ public final class TickActionDriver {
         BlockPos front = BlockPos.containing(ahead.x, pos.y, ahead.z);
         BlockState frontState = level.getBlockState(front);
         BlockState frontUp = level.getBlockState(front.above());
-        boolean blocked = !frontState.isAir() && frontState.isSolidRender();
-        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender();
+        boolean blocked = !frontState.isAir() && frontState.isSolidRender(front);
+        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender(front.above());
         return blocked && canPass && bot.onGround();
     }
 
@@ -738,7 +738,7 @@ public final class TickActionDriver {
      */
     public boolean isToolAboutToBreak() {
         try {
-            ItemStack held = bot.getInventory().getSelectedItem();
+            ItemStack held = bot.getInventory().getSelected();
             if (held.isEmpty() || !held.isDamageableItem()) {
                 return false;
             }
@@ -803,7 +803,7 @@ public final class TickActionDriver {
         }
 
         if (bestSlot >= 0) {
-            inv.setSelectedSlot(bestSlot);
+            inv.selected = bestSlot;
         }
     }
 
@@ -893,7 +893,7 @@ public final class TickActionDriver {
         bot.setYHeadRot(yaw);
         bot.zza = MOVE_FORWARD;
         bot.xxa = 0.0f;
-        if (shouldJumpToward((ServerLevel) bot.level(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
+        if (shouldJumpToward(((ServerLevel) bot.level()), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
             bot.setJumping(true);
         }
     }
@@ -957,7 +957,7 @@ public final class TickActionDriver {
         }
         // 切到对应快捷栏槽位（等价于真人滚轮/数字键切换）
         if (slot < 9) {
-            bot.getInventory().setSelectedSlot(slot);
+            bot.getInventory().selected = slot;
         }
 
         // 站到能碰到目标的位置
@@ -987,7 +987,7 @@ public final class TickActionDriver {
         Vec3 hitVec = new Vec3(against.getX() + 0.5, against.getY() + 0.5, against.getZ() + 0.5);
         BlockHitResult hit = new BlockHitResult(hitVec, face, against, false);
 
-        ItemStack held = bot.getInventory().getSelectedItem();
+        ItemStack held = bot.getInventory().getSelected();
         // 原版放置入口：会做朝向、碰撞、可替换性等全部校验
         var result = bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
         bot.swing(InteractionHand.MAIN_HAND);
@@ -1032,10 +1032,10 @@ public final class TickActionDriver {
 
         // 切到手上
         if (slot < 9) {
-            bot.getInventory().setSelectedSlot(slot);
+            bot.getInventory().selected = slot;
         }
 
-        ItemStack stack = bot.getInventory().getSelectedItem();
+        ItemStack stack = bot.getInventory().getSelected();
         // 必须是食物才能 startUsingItem
         if (!isFood(stack)) {
             fail("选中的物品不是食物: " + shortId(String.valueOf(

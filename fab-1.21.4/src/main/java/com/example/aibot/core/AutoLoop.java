@@ -457,11 +457,11 @@ public final class AutoLoop {
         String dimension = "";
         int px = 0, py = 0, pz = 0;
         try {
-            ServerLevel level = (ServerLevel) ((ServerLevel) player.level());
+            ServerLevel level = (ServerLevel) player.level();
             px = player.blockPosition().getX();
             py = player.blockPosition().getY();
             pz = player.blockPosition().getZ();
-            dimension = level.dimension().identifier().toString();
+            dimension = level.dimension().location().toString();
             stateJson = StateCollector.collect(player, this.goal);
         } catch (Throwable t) {
             LOGGER.log(Level.WARNING, "[AIBot] 状态采集失败", t);
@@ -570,7 +570,7 @@ public final class AutoLoop {
             return;
         }
 
-        ((ServerLevel) player.level()).getServer().execute(() -> {
+        player.level().getServer().execute(() -> {
             try {
                 ActionParser.ParsedAction parsed = ActionParser.parse(content);
                 if (parsed == null) {
@@ -691,7 +691,7 @@ public final class AutoLoop {
         if (player == null) {
             return;
         }
-        ServerLevel level = (ServerLevel) ((ServerLevel) player.level());
+        ServerLevel level = (ServerLevel) player.level();
         String type = parsed.getString("type", "other");
         String name = parsed.getString("name", type);
         int x = parsed.getInt("x", player.blockPosition().getX());
@@ -700,7 +700,7 @@ public final class AutoLoop {
         String note = parsed.getString("note", "");
 
         boolean added = landmarkMemory.remember(type, name, x, y, z,
-                level.dimension().identifier().toString(), note);
+                level.dimension().location().toString(), note);
         shortTermMemory.add(step, "remember", type + " " + name, true,
                 added ? "已记录新地标" : "已更新地标");
         lastFeedback = "地标已记录：" + name + " @ (" + x + "," + y + "," + z + ")";

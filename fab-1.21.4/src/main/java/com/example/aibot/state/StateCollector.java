@@ -109,7 +109,7 @@ public final class StateCollector {
         sb.append("\"saturation\":").append(fmt(bot.getFoodData().getSaturationLevel())).append(',');
         sb.append("\"on_ground\":").append(bot.onGround()).append(',');
         sb.append("\"alive\":").append(bot.isAlive()).append(',');
-        sb.append("\"dimension\":").append(jsonString(bot.level().dimension().identifier().toString()));
+        sb.append("\"dimension\":").append(jsonString(((ServerLevel) bot.level()).dimension().location().toString()));
         sb.append('}');
     }
 

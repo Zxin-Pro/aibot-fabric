@@ -291,25 +291,25 @@ public class ActionExecutor {
         }
 
         String full = itemId.contains(":") ? itemId : "minecraft:" + itemId;
-        ResourceLocation key = ResourceLocation.parse(full);
+        ResourceLocation key = ResourceLocation.tryParse(full);
         if (key == null) {
             return ActionResult.fail("非法物品 ID: " + itemId);
         }
-        net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.getValue(key);
+        net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.get(key);
         if (targetItem == null || targetItem == Items.AIR) {
             return ActionResult.fail("未知物品: " + itemId);
         }
 
         ServerLevel level = (ServerLevel) bot.level();
         var recipes = level.getServer().getRecipeManager();
-        var ctx = net.minecraft.world.item.crafting.display.SlotDisplayContext.fromLevel(level);
+        // 1.21.1 没有 RecipeDisplay 体系
 
         net.minecraft.world.item.crafting.RecipeHolder<?> matchedRecipe = null;
         ItemStack matchedResult = ItemStack.EMPTY;
         boolean recipeExists = false;
 
         for (var holder : recipes.getRecipes()) {
-            ItemStack result = resultOf(holder.value(), ctx);
+            ItemStack result = holder.value().getResultItem(level.registryAccess());
             if (result.isEmpty() || !result.is(targetItem)) {
                 continue;
             }
@@ -345,32 +345,10 @@ public class ActionExecutor {
                 + "（共 " + (perCraft * count) + " 个）");
     }
 
-    /** 取配方产物（1.21.11 的 RecipeDisplay 体系）。 */
-    protected ItemStack resultOf(net.minecraft.world.item.crafting.Recipe<?> recipe,
-                                 net.minecraft.util.context.ContextMap ctx) {
-        try {
-            var displays = recipe.display();
-            if (displays == null || displays.isEmpty()) {
-                return ItemStack.EMPTY;
-            }
-            var slot = displays.get(0).result();
-            if (slot == null) {
-                return ItemStack.EMPTY;
-            }
-            ItemStack s = slot.resolveForFirstStack(ctx);
-            return s == null ? ItemStack.EMPTY : s;
-        } catch (Throwable t) {
-            return ItemStack.EMPTY;
-        }
-    }
-
+    
     protected boolean hasIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
-            var info = recipe.placementInfo();
-            if (info == null) {
-                return false;
-            }
-            var ingredients = info.ingredients();
+            var ingredients = recipe.getIngredients();
             if (ingredients == null || ingredients.isEmpty()) {
                 return false;
             }
@@ -401,12 +379,8 @@ public class ActionExecutor {
 
     protected void consumeIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
-            var info = recipe.placementInfo();
-            if (info == null) {
-                return;
-            }
             var inv = bot.getInventory();
-            for (var ing : info.ingredients()) {
+            for (var ing : recipe.getIngredients()) {
                 if (ing == null || ing.isEmpty()) {
                     continue;
                 }
@@ -460,9 +434,11 @@ public class ActionExecutor {
      * 真人说话走的是聊天通道，所以这里用 {@code ChatType} 广播，
      * 让它和真人发言在客户端呈现上完全一致。</p>
      *
-     * <p><b>1.21.11 版本差异</b>：{@code broadcastChatMessage} 与
-     * {@code PlayerChatMessage.unsigned} 的签名和 1.20.1 完全一致
-     * （已用 javap 核对过 1.21.11 的 merged jar），因此这里的调用形式可以照搬。</p>
+     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：
+     * {@code PlayerList.broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)}
+     * 与 1.20.1 完全相同；{@code PlayerChatMessage.unsigned(UUID, String)} 与
+     * {@code ChatType.bind(ResourceKey, Entity)} 在 1.21.11 上也依然存在。
+     * 也就是说这一处两个模块可以逐字相同 —— 不要凭印象改动。</p>
      */
     protected ActionResult chat(ActionParser.ParsedAction parsed) {
         String message = parsed.getString("message", "");
@@ -478,9 +454,11 @@ public class ActionExecutor {
             //（有玩家名牌、进聊天记录、其他插件能监听到 PlayerChatEvent）。
             //
             // 签名：broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)
-            // 其中消息用 unsigned 构造 —— 在离线/伪造连接下这是正确做法
-            //（我们没有 Mojang 的会话密钥，也不应该伪造正版签名）。
-            // ChatType.bind(key, entity) 内部会去 registry 查 ChatType 再绑定发送者。
+            // 其中用 unsigned 构造表示「未签名」——
+            // 这在离线/伪造连接下是正确做法（我们没有 Mojang 的会话密钥，
+            // 也不应该伪造正版签名）。
+            // ChatType.bind(key, entity) 内部会去 registry 查 ChatType 再绑定发送者，
+            // 这是最省事且语义正确的用法。
             net.minecraft.network.chat.ChatType.Bound bound =
                     net.minecraft.network.chat.ChatType.bind(
                             net.minecraft.network.chat.ChatType.CHAT,
@@ -502,6 +480,10 @@ public class ActionExecutor {
      *
      * <p>原来的实现直接把 yaw/pitch 设为 0 —— 那会在一 tick 内把头猛转 180 度，
      * 真人的鼠标不可能这样。这里改为在当前朝向附近做小幅随机扫视。</p>
+     *
+     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：
+     * {@code ServerGamePacketListenerImpl.teleport(double, double, double, float, float)}
+     * 在 1.21.11 上依然存在，因此 {@code bot.connection.teleport(...)} 可用。</p>
      */
     protected ActionResult look(ActionParser.ParsedAction parsed) {
         float curYaw = bot.getYRot();
@@ -512,9 +494,7 @@ public class ActionExecutor {
         newPitch = Math.max(-60.0f, Math.min(60.0f, newPitch));
         bot.setYRot(newYaw % 360.0f);
         bot.setXRot(newPitch);
-        // 同步给客户端，否则其他玩家看到的是旧朝向。
-        // 1.21.11 的 connection 仍是 ServerGamePacketListenerImpl，
-        // 其 teleport(double,double,double,float,float) 签名与 1.20.1 相同。
+        // 同步给客户端，否则其他玩家看到的是旧朝向
         bot.connection.teleport(bot.getX(), bot.getY(), bot.getZ(),
                 bot.getYRot(), bot.getXRot());
         return ActionResult.ok("环顾四周完成");
@@ -555,7 +535,6 @@ public class ActionExecutor {
         try {
             var result = bot.startSleepInBed(bedPos);
             if (result.left().isPresent()) {
-                // 1.21.4 的 BedSleepingProblem 还没有 message()，只能报枚举名
                 return ActionResult.fail("无法入睡：" + result.left().get().name());
             }
             return ActionResult.ok("已上床睡觉");
@@ -749,11 +728,11 @@ public class ActionExecutor {
     /** 按注册 ID 解析方块。 */
     protected Block resolveBlock(String id) {
         String full = id.contains(":") ? id : "minecraft:" + id;
-        ResourceLocation key = ResourceLocation.parse(full);
+        ResourceLocation key = ResourceLocation.tryParse(full);
         if (key == null) {
             return null;
         }
-        Block b = BuiltInRegistries.BLOCK.getValue(key);
+        Block b = BuiltInRegistries.BLOCK.get(key);
         return b == null || b == Blocks.AIR ? null : b;
     }
 
