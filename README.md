@@ -273,14 +273,51 @@ cd aibot-fabric
 build-all.bat
 ```
 
+脚本会自动：读取版本号（不再写死）→ 逐个 `clean build` → 把四个 jar 复制到 `release\`
+并按 Minecraft 版本改名（`aibot-<版本>-<MC>.jar`），**直接就是可上传到 Releases 的文件**。
+
+**可调环境变量**（在运行前 `set`）：
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `SKIP_CLEAN` | `0` | 设为 `1` 跳过 `clean`，构建更快。**但见下方警告** |
+| `KEEP_DAEMON` | `1` | 设为 `0` 每个模块都 `--no-daemon`（更慢、更吃内存） |
+| `SETTLE_SECONDS` | `5` | 模块之间的等待秒数，让系统回收上一个 JVM 的内存 |
+| `AIBOT_GRADLE_HEAP` | `-Xmx1G` | Gradle JVM 堆大小 |
+
+> ⚠️ **关于 `clean`（这是实打实踩过的坑）**
+>
+> `processResources` 会把 `fabric.mod.json` 里的 `${version}` 展开成真实版本号，
+> 而 Gradle 的增量资源缓存**不一定会察觉到版本号变了**。
+> 结果就是：产出的 jar **文件名是 0.5.0，但里面写的还是 0.4.0** ——
+> 游戏能正常加载，但版本号显示错误，非常难排查。
+>
+> 所以默认走 `clean build`。只有在你**确认版本号没改过**时，才用 `SKIP_CLEAN=1` 加速。
+
+> ⚠️ **关于内存（如果你遇到 `Gradle build daemon disappeared unexpectedly`）**
+>
+> 每个模块的 `gradle.properties` 里写的是 `-Xmx2G`。**单个模块构建完全没问题，
+> 但连跑四个会失败**：Windows 会为每个 JVM 预先提交（commit）内存，
+> 等到第三个或第四个时提交额度就耗尽了，于是报
+> `insufficient memory for the Java Runtime Environment` 或
+> `daemon disappeared` —— 而此时任务管理器可能还显示好几个 GB "可用"
+> （**物理内存剩余 ≠ 提交额度剩余**，这是最容易误判的地方）。
+>
+> 脚本已经把堆降到 `-Xmx1G` 并复用同一个 daemon 来规避。
+> 如果你的机器内存很宽裕、想用回 2G，设 `set AIBOT_GRADLE_HEAP=-Xmx2G`；
+> 反过来如果还是失败，先关掉其他占用内存的程序，
+> 或者干脆一个一个模块构建（见下方「方式二」）。
+
 ### 方式二：手动逐版本构建
+
+**建议始终带 `clean`**（原因见上）。若内存紧张，一次只构建一个模块。
 
 **1.20.1（注意用 JDK 21 启动 Gradle）：**
 
 ```bat
 set "JAVA_HOME=C:\path\to\jdk-21"
 cd fab-1.20.1
-gradlew.bat build --no-daemon
+gradlew.bat clean build --no-daemon
 ```
 
 **1.21.1 / 1.21.11：**
@@ -288,7 +325,7 @@ gradlew.bat build --no-daemon
 ```bat
 set "JAVA_HOME=C:\path\to\jdk-21"
 cd fab-1.21.11
-gradlew.bat build --no-daemon
+gradlew.bat clean build --no-daemon
 ```
 
 **26.3（必须用 JDK 25）：**
@@ -296,14 +333,29 @@ gradlew.bat build --no-daemon
 ```bat
 set "JAVA_HOME=C:\path\to\jdk-25"
 cd fab-26.3
-gradlew.bat build --no-daemon
+gradlew.bat clean build --no-daemon
+```
+
+如果报 `insufficient memory`，加一个较小的堆：
+
+```bat
+gradlew.bat clean build --no-daemon -Dorg.gradle.jvmargs=-Xmx1G
 ```
 
 > Linux / macOS 把 `gradlew.bat` 换成 `./gradlew`，`set` 换成 `export`。
 
 ### 产物位置
 
-每个模块构建后产出（版本号以实际为准，当前为 `0.5.0`）：
+`build-all.bat` 会把四个 jar 收集到：
+
+```
+release/aibot-<版本号>-1.20.1.jar
+release/aibot-<版本号>-1.21.1.jar
+release/aibot-<版本号>-1.21.11.jar
+release/aibot-<版本号>-26.3.jar    <- 这四个就是上传 Releases 用的
+```
+
+每个模块自己的原始产物（版本号以实际为准，当前为 `0.5.0`）：
 
 ```
 fab-<版本>/build/libs/aibot-<版本号>.jar           <- 装进 mods 的就是这个
@@ -626,6 +678,9 @@ gradlew.bat runClient --info
 | `错误: 不支持发行版本 25` / `Cannot find a Java installation ... languageVersion=17` | Gradle 找不到目标 toolchain，去 GitHub 下载失败 | 在对应模块 `gradle.properties` 里加 `org.gradle.java.installations.paths=...` 登记本机 JDK 路径 |
 | `Dependency requires at least JVM runtime version 21. This build uses a Java 17 JVM` | 用 JDK 17 启动了 Gradle | 1.20.1 也用 **JDK 21** 启动 Gradle（编译目标仍是 17，由 toolchain 控制） |
 | `Could not HEAD 'https://github.com/adoptium/...'` | toolchain 下载走 GitHub，网络不通 | 同第 1 条；或用国内镜像手动装 JDK |
+| `Gradle build daemon disappeared unexpectedly` | **提交内存（commit）耗尽**，不是物理内存不足。连跑多个模块时最常见 | 用 `build-all.bat`（已降到 `-Xmx1G`）；或一次只构建一个模块；或 `-Dorg.gradle.jvmargs=-Xmx1G` |
+| `insufficient memory for the Java Runtime Environment` | 同上 | 同上。注意任务管理器显示「可用内存」充裕也可能报这个 |
+| jar 文件名是 0.5.0 但游戏里显示 0.4.0 | Gradle 增量资源缓存没重新展开 `${version}` | 用 `clean build`，别用裸 `build`（`build-all.bat` 默认已带 `clean`） |
 | Gradle 下载超时 | `services.gradle.org` 重定向到被墙的 CDN | 已默认改为腾讯云镜像，见 `gradle-wrapper.properties` |
 | `Connection是抽象的; 无法实例化` | 简单名 `Connection` 被 `WaypointTransmitter.Connection` 嵌套类遮蔽（1.21.11） | 用全限定名 `net.minecraft.network.Connection`（本项目已处理） |
 | `找不到符号: 方法 getDayTime()` | 26.3 移除了 `Level.getDayTime()`，改用 `WorldClock` 体系 | 用 `level.getOverworldClockTime()`（本项目已处理） |
@@ -664,7 +719,7 @@ gradlew.bat runClient --info
 
 ```
 aibot-fabric/
-├── build-all.bat                    一键构建四版本
+├── build-all.bat                    一键构建四版本（自动读版本号，产物收集到 release/）
 ├── README.md                        本文件（UTF-8 with BOM）
 ├── fab-1.20.1/                      1.20.1 模块（Java 17，Loom remap）
 ├── fab-1.21.1/                      1.21.1 模块（Java 21）
