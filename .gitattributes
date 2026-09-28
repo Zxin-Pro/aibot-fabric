@@ -1,0 +1,27 @@
+# 统一换行符策略，避免 Windows 批处理被 clone 成 LF 后无法正确执行。
+#
+# 背景：cmd.exe 用系统 ANSI 代码页读取 .bat，且对「只有 LF 没有 CR」的文件
+# 解析并不可靠（可能把整行当成标签或吞掉命令）。仓库原先没有本文件，
+# 而 core.autocrlf=true 会让 git 以 LF 存储，于是从 GitHub 下载到的 .bat
+# 是 LF 版本 —— 与本机开发时的 CRLF 行为不一致，属于典型的「在我机器上能跑」。
+#
+# 规则：
+#   *.bat / *.cmd  -> 强制 CRLF（无论谁 clone，永远是 Windows 能跑的换行）
+#   其余文本文件   -> 强制 LF（保持仓库存储一致，避免无意义的整文件 diff）
+#   二进制文件     -> 不做任何转换
+
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：显式声明，防止 git 尝试做行尾转换而损坏文件
+*.jar   binary
+*.png   binary
+*.zip   binary
+*.log   binary
+
+# 生成物与本地环境文件
+release/   export-ignore
+tools/     export-ignore
+*.tmp      -text
