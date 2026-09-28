@@ -128,7 +128,7 @@ generations:
       关键断代：组件化（Component / ItemStack 的 Data Components）、
       CustomPacketPayload 引入、Registry 用 BuiltInRegistries。
       Java 21 基线。
-    status: pending
+    status: ready
 
   # ============ 1.21 ~ 1.21.1 (已是现成的) ============
   - id: fab-1.21.1
@@ -152,7 +152,7 @@ generations:
     loom: "1.17.19"
     gradle: "9.5.1"
     note: "移动/输入 API 调整。"
-    status: pending
+    status: ready
 
   # ============ 1.21.5 ~ 1.21.8 ============
   - id: fab-1.21.8
@@ -164,7 +164,7 @@ generations:
     loom: "1.17.19"
     gradle: "9.5.1"
     note: "输入与实体接口继续调整。"
-    status: pending
+    status: ready
 
   # ============ 1.21.9 ~ 1.21.11 (1.21.11 已是现成的) ============
   - id: fab-1.21.11
@@ -188,7 +188,7 @@ generations:
     loom: "1.17.19"
     gradle: "9.5.1"
     note: "新版本号体系起点。"
-    status: pending
+    status: ready
 
   # ============ 26.2 ============
   - id: fab-26.2
