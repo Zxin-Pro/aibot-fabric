@@ -1,6 +1,5 @@
 package com.example.aibot.state;
 
-import com.example.aibot.entity.AIBotPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
@@ -60,7 +59,7 @@ public final class StateCollector {
      * @param currentGoal  当前长期目标（用于放进状态，便于模型对照）
      * @return 状态 JSON 字符串
      */
-    public static String collect(AIBotPlayer bot, String currentGoal) {
+    public static String collect(net.minecraft.server.level.ServerPlayer bot, String currentGoal) {
         StringBuilder sb = new StringBuilder(2048);
         sb.append('{');
 
@@ -97,7 +96,7 @@ public final class StateCollector {
     }
 
     /** 自身状态：坐标、血量、饥饿、维度、是否在地面、时间。 */
-    private static void appendSelf(StringBuilder sb, AIBotPlayer bot) {
+    private static void appendSelf(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"self\":{");
         sb.append("\"name\":").append(jsonString(bot.getName().getString())).append(',');
         sb.append("\"x\":").append(fmt(bot.getX())).append(',');
@@ -115,7 +114,7 @@ public final class StateCollector {
     }
 
     /** 背包物品：按槽位顺序，格式固定。 */
-    private static void appendInventory(StringBuilder sb, AIBotPlayer bot) {
+    private static void appendInventory(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"inventory\":[");
         Inventory inv = bot.getInventory();
         int written = 0;
@@ -140,7 +139,7 @@ public final class StateCollector {
     /**
      * 附近方块：统计半径内出现的方块种类及数量，按【数量降序 + ID 字典序】排序，保证稳定。
      */
-    private static void appendNearbyBlocks(StringBuilder sb, AIBotPlayer bot) {
+    private static void appendNearbyBlocks(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"nearby_blocks\":[");
         ServerLevel level = bot.level();
         BlockPos center = bot.blockPosition();
@@ -201,7 +200,7 @@ public final class StateCollector {
     }
 
     /** 附近实体：按距离升序，同距离按类型 ID 排序。 */
-    private static void appendNearbyEntities(StringBuilder sb, AIBotPlayer bot) {
+    private static void appendNearbyEntities(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"nearby_entities\":[");
         ServerLevel level = bot.level();
         AABB box = bot.getBoundingBox().inflate(ENTITY_SCAN_RADIUS);
@@ -247,7 +246,7 @@ public final class StateCollector {
     }
 
     /** 附近玩家：按距离升序。 */
-    private static void appendNearbyPlayers(StringBuilder sb, AIBotPlayer bot) {
+    private static void appendNearbyPlayers(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"nearby_players\":[");
         List<ServerPlayer> players = bot.level().players();
         List<PlayerInfo> infos = new ArrayList<>();
@@ -277,7 +276,7 @@ public final class StateCollector {
     }
 
     /** 环境：时间、天气、光照。 */
-    private static void appendEnvironment(StringBuilder sb, AIBotPlayer bot) {
+    private static void appendEnvironment(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         ServerLevel level = bot.level();
         long dayTime = level.getOverworldClockTime() % 24000L;
         sb.append("\"environment\":{");

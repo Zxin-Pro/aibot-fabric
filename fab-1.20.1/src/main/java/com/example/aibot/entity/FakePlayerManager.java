@@ -26,6 +26,16 @@ public final class FakePlayerManager {
     private AIBotPlayer currentBot;
 
     /**
+     * 重生后由原版创建的普通 ServerPlayer。
+     * 原版 respawn 会 new 一个新的 ServerPlayer，丢掉我们的 AIBotPlayer 子类，
+     * 所以这里单独保存，保证重生后仍能继续控制。
+     */
+    private ServerPlayer plainBot;
+
+    /** 最近一次 spawn 时的服务器引用，兜底用。 */
+    private MinecraftServer lastServer;
+
+    /**
      * 生成假玩家。
      *
      * @param server 服务器
@@ -39,6 +49,7 @@ public final class FakePlayerManager {
         }
 
         try {
+            this.lastServer = server;
             ServerLevel overworld = server.overworld();
 
             // 1. 构造假玩家实体（版本差异封装在 AIBotPlayer 里）
@@ -54,7 +65,6 @@ public final class FakePlayerManager {
             // 3. 注册到玩家列表，让它真正「入服」
             //    注意参数类型：第一个参数要原始 Connection（不是 connection 字段，
             //    那个是 ServerGamePacketListenerImpl）。
-            // 1.20.1 的 placeNewPlayer 只有 2 个参数（没有 CommonListenerCookie）
             server.getPlayerList().placeNewPlayer(bot.getNetworkConnection(), bot);
 
             this.currentBot = bot;
@@ -75,7 +85,7 @@ public final class FakePlayerManager {
      * @return 是否真的移除了
      */
     public boolean remove(MinecraftServer server) {
-        AIBotPlayer bot = this.currentBot;
+        ServerPlayer bot = getPlayer();
         if (bot == null) {
             return false;
         }
@@ -85,8 +95,68 @@ public final class FakePlayerManager {
             LOGGER.log(Level.WARNING, "[AIBot] 从玩家列表移除假玩家时出错", t);
         }
         this.currentBot = null;
+        this.plainBot = null;
         LOGGER.info("[AIBot] 假玩家已移除");
         return true;
+    }
+
+    /**
+     * 让假玩家重生。
+     *
+     * <p><b>关键坑</b>：原版 {@code PlayerList.respawn(...)} 内部是
+     * {@code new ServerPlayer(...)} —— 它会创建一个<b>全新的普通 ServerPlayer</b>，
+     * 把我们的 {@link AIBotPlayer} 子类实例丢掉。
+     * 因此重生后必须用返回的新实例替换 {@link #currentBot}，
+     * 否则后续所有 {@code getBot()} 调用都会拿到已死亡/已移除的旧对象。</p>
+     *
+     * @param server 服务器
+     * @return 重生后的玩家；失败返回 null
+     */
+    public ServerPlayer respawn(MinecraftServer server) {
+        AIBotPlayer old = this.currentBot;
+        if (old == null) {
+            return null;
+        }
+        try {
+            ServerPlayer fresh = server.getPlayerList().respawn(old, true);
+            if (fresh == null) {
+                LOGGER.warning("[AIBot] 重生失败：respawn 返回 null");
+                return null;
+            }
+            // 重要：respawn 返回的是新对象，必须更新引用
+            this.currentBot = (fresh instanceof AIBotPlayer ap) ? ap : null;
+            this.plainBot = (this.currentBot == null) ? fresh : null;
+
+            LOGGER.info("[AIBot] 假玩家已重生: " + fresh.getName().getString()
+                    + " @ " + fresh.blockPosition().toShortString()
+                    + (this.currentBot == null ? "（注意：重生后不再是我们自己的实体子类，行为仍可用）" : ""));
+            return fresh;
+        } catch (Throwable t) {
+            LOGGER.log(Level.SEVERE, "[AIBot] 假玩家重生失败", t);
+            return null;
+        }
+    }
+
+    /** 当前假玩家（可能为 null）。 */
+    public ServerPlayer getPlayer() {
+        if (this.currentBot != null) {
+            return this.currentBot;
+        }
+        return this.plainBot;
+    }
+
+    /** 最近一次操作的服务器实例（重生等操作需要）。 */
+    public MinecraftServer getServerOf() {
+        ServerPlayer p = getPlayer();
+        if (p != null && p.level() != null) {
+            return p.level().getServer();
+        }
+        return this.lastServer;
+    }
+
+    /** 记录服务器引用（spawn 时更新），用于玩家对象不可用时仍能操作。 */
+    public void setServer(MinecraftServer server) {
+        this.lastServer = server;
     }
 
     /** 当前假玩家，可能为 null。 */
@@ -94,9 +164,15 @@ public final class FakePlayerManager {
         return this.currentBot;
     }
 
+    /** 任意形态的假玩家是否存活（含重生后的普通 ServerPlayer）。 */
+    public boolean isPlayerAlive() {
+        ServerPlayer p = getPlayer();
+        return p != null && p.isAlive();
+    }
+
     /** 假玩家是否存在且存活。 */
     public boolean isAlive() {
-        return this.currentBot != null && this.currentBot.isAlive();
+        return isPlayerAlive();
     }
 
     /**
@@ -111,9 +187,8 @@ public final class FakePlayerManager {
         if (message == null || message.trim().isEmpty()) {
             return;
         }
-        String text = "<" + (this.currentBot != null
-                ? this.currentBot.getName().getString()
-                : "AIBot") + "> " + message.trim();
+        ServerPlayer bot = getPlayer();
+        String text = "<" + (bot != null ? bot.getName().getString() : "AIBot") + "> " + message.trim();
         try {
             server.getPlayerList().broadcastSystemMessage(Component.literal(text), false);
             LOGGER.info("[AIBot] 假玩家说话: " + text);

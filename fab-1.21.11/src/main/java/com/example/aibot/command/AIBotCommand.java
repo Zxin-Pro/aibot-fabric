@@ -9,6 +9,7 @@ import com.example.aibot.entity.AIBotPlayer;
 import com.example.aibot.entity.FakePlayerManager;
 import com.example.aibot.llm.CacheStats;
 import com.example.aibot.llm.PromptBuilder;
+import com.example.aibot.memory.LandmarkMemory;
 import com.example.aibot.memory.LongTermMemory;
 import com.example.aibot.memory.ShortTermMemory;
 import com.mojang.brigadier.CommandDispatcher;
@@ -48,6 +49,7 @@ public final class AIBotCommand {
     private final FakePlayerManager playerManager;
     private final ShortTermMemory shortTermMemory;
     private final LongTermMemory longTermMemory;
+    private final LandmarkMemory landmarkMemory;
     private final AutoLoop autoLoop;
     private final Supplier<MinecraftServer> serverSupplier;
 
@@ -56,6 +58,7 @@ public final class AIBotCommand {
                         FakePlayerManager playerManager,
                         ShortTermMemory shortTermMemory,
                         LongTermMemory longTermMemory,
+                        LandmarkMemory landmarkMemory,
                         AutoLoop autoLoop,
                         Supplier<MinecraftServer> serverSupplier) {
         this.configStore = configStore;
@@ -63,6 +66,7 @@ public final class AIBotCommand {
         this.playerManager = playerManager;
         this.shortTermMemory = shortTermMemory;
         this.longTermMemory = longTermMemory;
+        this.landmarkMemory = landmarkMemory;
         this.autoLoop = autoLoop;
         this.serverSupplier = serverSupplier;
     }
@@ -119,6 +123,16 @@ public final class AIBotCommand {
                 .then(Commands.literal("do")
                         .then(Commands.argument("json", StringArgumentType.greedyString())
                                 .executes(ctx -> doManualAction(ctx))))
+
+                // ---------------- plan ----------------
+                .then(Commands.literal("plan")
+                        .then(Commands.literal("show").executes(ctx -> doPlanShow(ctx)))
+                        .then(Commands.literal("clear").executes(ctx -> doPlanClear(ctx))))
+
+                // ---------------- landmark ----------------
+                .then(Commands.literal("landmark")
+                        .then(Commands.literal("show").executes(ctx -> doLandmarkShow(ctx)))
+                        .then(Commands.literal("clear").executes(ctx -> doLandmarkClear(ctx))))
 
                 // ---------------- config ----------------
                 .then(Commands.literal("config")
@@ -238,8 +252,42 @@ public final class AIBotCommand {
                 : fail(ctx, "执行失败：" + result.message());
     }
 
-    private int doConfigShow(CommandContext<CommandSourceStack> ctx) {
-        AIConfig c = configStore.get();
+    /** 显示当前计划。 */
+    private int doPlanShow(CommandContext<CommandSourceStack> ctx) {
+        send(ctx, "===== 当前执行计划 =====\n" + autoLoop.getPlan().serialize()
+                + "\n进度: " + autoLoop.getPlan().doneCount() + "/" + autoLoop.getPlan().size());
+        return 1;
+    }
+
+    /** 清空计划（下次决策时会重新规划）。 */
+    private int doPlanClear(CommandContext<CommandSourceStack> ctx) {
+        autoLoop.getPlan().clear();
+        return ok(ctx, "计划已清空，下一轮将重新制定");
+    }
+
+    /** 显示已知地标。 */
+    private int doLandmarkShow(CommandContext<CommandSourceStack> ctx) {
+        var player = playerManager.getPlayer();
+        if (player == null) {
+            send(ctx, "===== 已知地标 =====\n（假玩家未生成，无法计算距离）\n"
+                    + "共 " + landmarkMemory.size() + " 个地标");
+            return 1;
+        }
+        var level = player.level();
+        String dim = level.dimension().identifier().toString();
+        var pos = player.blockPosition();
+        send(ctx, "===== 已知地标 =====\n"
+                + landmarkMemory.serialize(pos.getX(), pos.getY(), pos.getZ(), dim));
+        return 1;
+    }
+
+    /** 清空地标。 */
+    private int doLandmarkClear(CommandContext<CommandSourceStack> ctx) {
+        landmarkMemory.clear();
+        return ok(ctx, "地标记忆已清空");
+    }
+
+    private int doConfigShow(CommandContext<CommandSourceStack> ctx) {        AIConfig c = configStore.get();
         StringBuilder sb = new StringBuilder("===== AIBot 配置 =====\n");
         sb.append("apiKey: ").append(c.maskedApiKey()).append('\n');
         sb.append("baseUrl: ").append(c.baseUrl).append('\n');

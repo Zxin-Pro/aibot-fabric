@@ -44,10 +44,6 @@ public class AIBotPlayer extends ServerPlayer {
      * {@code ServerGamePacketListenerImpl}（数据包监听器），
      * 而 {@code PlayerList.placeNewPlayer(...)} 需要的是原始 {@code net.minecraft.network.Connection}。
      * 两者类型不同，必须分开保存，否则编译报「不兼容的类型」。</p>
-     *
-     * <p><b>踩坑记录</b>：这里用【全限定名】声明更安全，
-     * 避免将来版本出现同名嵌套类型遮蔽简单名
-     * （1.21.11 的 {@code WaypointTransmitter.Connection} 就会遮蔽它）。</p>
      */
     private final net.minecraft.network.Connection networkConnection;
 
@@ -56,27 +52,24 @@ public class AIBotPlayer extends ServerPlayer {
      *
      * <p><b>1.20.1 与 1.21.x 的关键差异</b>：
      * 1.20.1 的构造函数是 <b>3 参数</b>
-     * {@code (MinecraftServer, ServerLevel, GameProfile)}，
-     * 没有 {@code ClientInformation}；1.21.x 起变成 4 参数。</p>
+     * {@code (MinecraftServer, ServerLevel, GameProfile)}，没有 {@code ClientInformation}；
+     * 且 {@code ServerGamePacketListenerImpl} 也是 <b>3 参数</b>，没有 {@code CommonListenerCookie}。</p>
      *
      * @param server 服务器实例
      * @param level  目标世界（通常为主世界）
      * @param name   玩家名
      */
     public AIBotPlayer(MinecraftServer server, ServerLevel level, String name) {
-        // 注意：1.20.1 没有 ClientInformation 参数
+        // 1.20.1 没有 ClientInformation 参数
         super(server, level, new GameProfile(offlineUuid(name), name));
-        // 不走真实 socket 的连接对象
         this.networkConnection = new net.minecraft.network.Connection(PacketFlow.SERVERBOUND);
-        // 用伪造的数据包监听器替换默认的空连接，避免部分代码路径 NPE。
-        // 1.20.1 的构造函数是 3 参数（没有 CommonListenerCookie）。
+        // 1.20.1 的监听器构造函数是 3 参数（没有 cookie）
         this.connection = new ServerGamePacketListenerImpl(
                 server,
                 this.networkConnection,
                 this);
     }
-
-    /** placeNewPlayer 需要的原始网络连接（注意不是 connection 字段）。 */
+/** placeNewPlayer 需要的原始网络连接（注意不是 connection 字段）。 */
     public net.minecraft.network.Connection getNetworkConnection() {
         return this.networkConnection;
     }

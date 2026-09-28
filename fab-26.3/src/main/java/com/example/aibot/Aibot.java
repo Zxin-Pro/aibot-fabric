@@ -9,8 +9,10 @@ import com.example.aibot.llm.CacheStats;
 import com.example.aibot.llm.LLMClient;
 import com.example.aibot.llm.PromptBuilder;
 import com.example.aibot.llm.StaticPrefix;
+import com.example.aibot.memory.LandmarkMemory;
 import com.example.aibot.memory.LongTermMemory;
 import com.example.aibot.memory.ShortTermMemory;
+import com.example.aibot.core.TaskPlan;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -52,6 +54,7 @@ public class Aibot implements ModInitializer {
     private FakePlayerManager playerManager;
     private ShortTermMemory shortTermMemory;
     private LongTermMemory longTermMemory;
+    private LandmarkMemory landmarkMemory;
     private AutoLoop autoLoop;
     private AIBotCommand command;
 
@@ -110,26 +113,46 @@ public class Aibot implements ModInitializer {
             this.playerManager = new FakePlayerManager();
             this.shortTermMemory = new ShortTermMemory();
             this.longTermMemory = new LongTermMemory(gameDir);
+            this.landmarkMemory = new LandmarkMemory(gameDir);
 
             // 加载持久化数据
             AIConfig config = this.configStore.load();
             this.longTermMemory.load();
+            this.landmarkMemory.load();
 
             // LLM 客户端（内部使用守护线程池做异步 HTTP）
             this.llmClient = new LLMClient(config, this.cacheStats);
 
             // 组装自主循环
             this.autoLoop = new AutoLoop(config, this.cacheStats, this.llmClient,
-                    this.playerManager, this.shortTermMemory, this.longTermMemory);
+                    this.playerManager, this.shortTermMemory, this.longTermMemory, this.landmarkMemory);
+
+            // 恢复上次保存的计划，让服务器重启后能接着做
+            if (config.persistPlan) {
+                java.util.List<TaskPlan.Task> saved = this.longTermMemory.loadPlan();
+                if (saved != null && !saved.isEmpty()) {
+                    this.autoLoop.restorePlan(saved);
+                    LOGGER.info("[AIBot] 已恢复上次的计划（{} 个任务）", saved.size());
+                }
+            }
 
             // 命令处理器
             this.command = new AIBotCommand(this.configStore, this.cacheStats, this.playerManager,
-                    this.shortTermMemory, this.longTermMemory, this.autoLoop, () -> this.server);
+                    this.shortTermMemory, this.longTermMemory, this.landmarkMemory,
+                    this.autoLoop, () -> this.server);
 
             LOGGER.info("[AIBot] 组件已就绪，配置文件: {}", this.configStore.getConfigFile().toAbsolutePath());
 
             if (!config.isUsable()) {
                 LOGGER.warn("[AIBot] LLM 尚未配置，请执行 /aibot config set apiKey <你的密钥>");
+            }
+
+            // 长期自主模式提示
+            if (config.maxStepsPerSession <= 0) {
+                LOGGER.info("[AIBot] 步数上限：无限制（可持续自主运行）");
+            }
+            if (config.autoRespawn) {
+                LOGGER.info("[AIBot] 死亡自动重生：已开启");
             }
 
             // 安全提醒（需求：提醒备份存档）
@@ -173,6 +196,14 @@ public class Aibot implements ModInitializer {
             }
             if (this.longTermMemory != null) {
                 this.longTermMemory.save();
+                // 保存当前计划，让下次启动能接着做
+                if (this.autoLoop != null && this.configStore != null
+                        && this.configStore.get().persistPlan) {
+                    this.longTermMemory.savePlan(this.autoLoop.getPlan());
+                }
+            }
+            if (this.landmarkMemory != null) {
+                this.landmarkMemory.save();
             }
             if (this.configStore != null) {
                 this.configStore.save();
@@ -204,5 +235,9 @@ public class Aibot implements ModInitializer {
 
     public ConfigStore getConfigStore() {
         return configStore;
+    }
+
+    public LandmarkMemory getLandmarkMemory() {
+        return landmarkMemory;
     }
 }

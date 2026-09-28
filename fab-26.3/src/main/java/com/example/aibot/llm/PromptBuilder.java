@@ -47,11 +47,13 @@ public final class PromptBuilder {
     }
 
     /**
-     * 构建提示词。
+     * 构建提示词（长期自主模式）。
      *
      * @param stateJson      当前世界状态 JSON（字段顺序必须固定，由 StateCollector 保证）
      * @param shortTermMemory 短期记忆（最近若干条动作及结果，固定格式）
      * @param longTermMemory  长期记忆摘要（固定格式）
+     * @param plan            当前执行计划（任务栈，固定格式）
+     * @param landmarks       地标记忆（含相对当前位置的距离）
      * @param goal           当前长期目标，可为空字符串
      * @param lastFeedback    上一步动作的执行结果反馈，可为空字符串
      * @return 构建好的提示词
@@ -59,16 +61,28 @@ public final class PromptBuilder {
     public static BuiltPrompt build(String stateJson,
                                     String shortTermMemory,
                                     String longTermMemory,
+                                    String plan,
+                                    String landmarks,
                                     String goal,
                                     String lastFeedback) {
-        StringBuilder sb = new StringBuilder(1024);
+        StringBuilder sb = new StringBuilder(2048);
 
         sb.append(StaticPrefix.DYNAMIC_SECTION_HEADER);
 
-        // 固定的小节顺序：目标 -> 状态 -> 短期记忆 -> 长期记忆 -> 上一步反馈
-        // 顺序固定本身也是缓存友好的做法（哪怕这段每次变化）
+        // 固定的小节顺序，且顺序本身也是固定的（缓存友好）。
+        // 把「目标 + 计划」放最前，因为这是模型最需要的上下文。
         sb.append("\n[当前长期目标]\n");
         sb.append(goal == null || goal.trim().isEmpty() ? "(未设定，以生存和探索为主)" : goal.trim());
+        sb.append("\n");
+
+        sb.append("\n[当前执行计划]\n");
+        sb.append(plan == null || plan.trim().isEmpty() ? "(无计划)" : plan.trim());
+        sb.append("\n");
+        sb.append("说明：计划中用 [>] 标记的是你当前正在进行的一步。");
+        sb.append("请优先完成当前这一步；完成后系统会自动推进到下一步。\n");
+
+        sb.append("\n[已知地标]\n");
+        sb.append(landmarks == null || landmarks.trim().isEmpty() ? "(暂无)" : landmarks.trim());
         sb.append("\n");
 
         sb.append("\n[当前世界状态]\n");
@@ -92,6 +106,17 @@ public final class PromptBuilder {
         sb.append("\n请输出下一步动作 JSON：\n");
 
         return new BuiltPrompt(StaticPrefix.SYSTEM_PROMPT, STATIC_USER, sb.toString());
+    }
+
+    /**
+     * 构建提示词（简化重载，无计划与地标，兼容旧调用）。
+     */
+    public static BuiltPrompt build(String stateJson,
+                                    String shortTermMemory,
+                                    String longTermMemory,
+                                    String goal,
+                                    String lastFeedback) {
+        return build(stateJson, shortTermMemory, longTermMemory, "", "", goal, lastFeedback);
     }
 
     /**

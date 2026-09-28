@@ -83,6 +83,37 @@ public final class ActionParser {
         }
 
         /**
+         * 取字符串数组参数（用于 plan 动作的 steps）。
+         * 同时容忍模型返回单个字符串或 JSON null。
+         */
+        public java.util.List<String> getStringList(String key) {
+            java.util.List<String> out = new ArrayList<>();
+            try {
+                if (!has(key)) {
+                    return out;
+                }
+                JsonElement el = json.get(key);
+                if (el.isJsonArray()) {
+                    for (JsonElement item : el.getAsJsonArray()) {
+                        if (!item.isJsonNull()) {
+                            String s = item.isJsonPrimitive() ? item.getAsString() : item.toString();
+                            if (s != null && !s.trim().isEmpty()) {
+                                out.add(s.trim());
+                            }
+                        }
+                    }
+                } else if (el.isJsonPrimitive()) {
+                    String s = el.getAsString();
+                    if (s != null && !s.trim().isEmpty()) {
+                        out.add(s.trim());
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            return out;
+        }
+
+        /**
          * 把参数格式化为短字符串，用于记忆与日志。
          * 字段顺序固定（按 key 排序），保证序列化稳定。
          */
@@ -157,6 +188,29 @@ public final class ActionParser {
         return null;
     }
 
+    /**
+     * 直接构造一个动作（供内部反射逻辑使用，不经过 LLM）。
+     *
+     * @param action 动作名
+     * @param key    参数名
+     * @param value  参数值（String / Number / Boolean）
+     * @return 可直接交给 ActionExecutor 的动作对象
+     */
+    public static ParsedAction fromParams(String action, String key, Object value) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("action", action);
+        if (key != null && !key.isEmpty() && value != null) {
+            if (value instanceof Number n) {
+                obj.addProperty(key, n);
+            } else if (value instanceof Boolean b) {
+                obj.addProperty(key, b);
+            } else {
+                obj.addProperty(key, String.valueOf(value));
+            }
+        }
+        return new ParsedAction(action, obj, "内部反射触发");
+    }
+
     /** 尝试把一段文本解析为动作对象。 */
     private static ParsedAction tryParse(String candidate) {
         try {
@@ -187,8 +241,7 @@ public final class ActionParser {
     }
 
     /** 去掉 ```json ... ``` 或 ``` ... ``` 围栏。 */
-    private static String stripCodeFence(String text) {
-        String t = text;
+    private static String stripCodeFence(String text) {        String t = text;
         if (t.startsWith("```")) {
             int firstNewline = t.indexOf('\n');
             if (firstNewline > 0) {

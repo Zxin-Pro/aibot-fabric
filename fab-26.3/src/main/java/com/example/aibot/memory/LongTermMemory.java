@@ -217,6 +217,66 @@ public final class LongTermMemory {
         failures.clear();
     }
 
+    // ------------------------------------------------------------------
+    // 计划持久化：让服务器重启后能接着做未完成的事
+    // ------------------------------------------------------------------
+
+    /** 计划存档文件（与 memory.json 同目录）。 */
+    private Path planFile() {
+        return this.memoryFile.resolveSibling("plan.json");
+    }
+
+    /**
+     * 保存当前计划。
+     *
+     * @param plan 任务计划
+     */
+    public synchronized void savePlan(com.example.aibot.core.TaskPlan plan) {
+        try {
+            Files.createDirectories(this.memoryFile.getParent());
+            PlanFile pf = new PlanFile();
+            pf.tasks = plan.exportTasks();
+            Path tmp = planFile().resolveSibling("plan.json.tmp");
+            Files.write(tmp, GSON.toJson(pf).getBytes(StandardCharsets.UTF_8));
+            try {
+                Files.move(tmp, planFile(),
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicFailed) {
+                Files.move(tmp, planFile(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "[AIBot] 保存计划失败", e);
+        }
+    }
+
+    /**
+     * 读取上次保存的计划。
+     *
+     * @return 任务列表；无存档时返回空列表
+     */
+    public synchronized List<com.example.aibot.core.TaskPlan.Task> loadPlan() {
+        List<com.example.aibot.core.TaskPlan.Task> out = new ArrayList<>();
+        try {
+            Path f = planFile();
+            if (!Files.exists(f)) {
+                return out;
+            }
+            String json = new String(Files.readAllBytes(f), StandardCharsets.UTF_8);
+            PlanFile pf = GSON.fromJson(json, PlanFile.class);
+            if (pf != null && pf.tasks != null) {
+                out.addAll(pf.tasks);
+            }
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "[AIBot] 读取计划失败", e);
+        }
+        return out;
+    }
+
+    /** 计划存档结构（字段顺序固定）。 */
+    private static final class PlanFile {
+        List<com.example.aibot.core.TaskPlan.Task> tasks;
+    }
+
     public synchronized int successCount() {
         return successes.size();
     }

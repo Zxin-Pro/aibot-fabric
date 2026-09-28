@@ -12,7 +12,7 @@ import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import java.util.UUID;
 
 /**
- * AIBot 假玩家实体（1.21.1 实现）。
+ * AIBot 假玩家实体（1.21.11 实现）。
  *
  * <p><b>版本差异（务必对照其他模块）</b>：</p>
  * <ul>

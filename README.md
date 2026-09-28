@@ -1,16 +1,45 @@
 # AIBot —— 由大语言模型自主控制的 Minecraft AI 假玩家
 
 一个 Fabric 模组：在 Minecraft 里加入一个由 LLM 驱动的假玩家。它能自主观察世界、规划任务、执行动作、
-与玩家对话，并在无人干预下持续游玩。**支持 Minecraft 1.20.1 / 1.21.1 / 1.21.11 / 26.3 四个版本。**
+与玩家对话，并在无人干预下**长期持续自主游玩**。**支持 Minecraft 1.20.1 / 1.21.1 / 1.21.11 / 26.3 四个版本。**
 
 ---
 
 ## 0. 一句话架构
 
-**四套独立 Gradle 模块共享同一份「版本无关」源码（配置 / LLM 客户端 / 提示词 / 记忆 / 动作解析），
-版本相关的部分（假玩家构造、注册表 API、命令权限、时钟 API）在各自模块内改写**——
+**四套独立 Gradle 模块共享同一份「版本无关」源码（配置 / LLM 客户端 / 提示词 / 记忆 / 任务计划 / 动作解析），
+版本相关的部分（假玩家构造、注册表 API、命令权限、时钟 API、配方系统）在各自模块内改写**——
 因为 26.3 用非重映射的 `fabric-loom` 而 1.x 用 `fabric-loom-remap`，
-单一 `build.gradle` 无法干净地覆盖四个目标，多模块是唯一稳妥的结构。
+且 26.3 与 1.20.1 的配方 API 完全不同，单一 `build.gradle` 无法干净地覆盖四个目标，多模块是唯一稳妥的结构。
+
+---
+
+## 0.5 完全自主运行（本版本核心能力）
+
+让假玩家「一直玩下去」需要解决的四个问题，本项目均已实现：
+
+| 问题 | 解决方案 | 实现位置 |
+|---|---|---|
+| 死了就彻底停机 | **死亡自动重生**：检测死亡 → 等待 → 调用原版 respawn → 继续循环 | `AutoLoop.handleDeath()` |
+| 跑 200 步就停 | **移除步数上限**（默认 0 = 无限），可选自动续跑 | `AIConfig.maxStepsPerSession` |
+| 反复横跳做不成事 | **结构化任务计划**：目标拆解成任务栈，完成一步才推进 | `TaskPlan` |
+| 走远就找不到家 | **地标记忆**：基地/箱子/矿洞坐标持久化，提示词里带相对距离 | `LandmarkMemory` |
+| LLM 判断失误导致猝死 | **生存反射**：血量/饥饿过低时绕过 LLM 强制执行自保 | `AutoLoop.runSurvivalReflex()` |
+| 卡在做不到的目标上空转 | **卡住自动恢复**：任务连续失败 5 次自动跳过；连续失败触发换策略指令 | `TaskPlan.failCurrent()` |
+
+### 关键实现细节（踩坑记录）
+
+1. **`PlayerList.respawn()` 会丢弃我们的子类。**
+   原版内部是 `new ServerPlayer(...)`，重生后拿到的是**普通 ServerPlayer**，
+   不是我们的 `AIBotPlayer`。因此：
+   - `FakePlayerManager` 同时保存 `currentBot` 与 `plainBot`，用 `getPlayer()` 统一取；
+   - `ActionExecutor` / `StateCollector` 的参数类型放宽为 `ServerPlayer`，重生后仍能正常驱动。
+
+2. **重生保留物品栏。** `respawn(player, true)` 的第二个参数为 `true`，
+   否则一死辛苦攒的资源全丢，谈不上长期经营。
+
+3. **计划跨重启持久化。** 计划写入 `config/aibot/plan.json`，
+   服务器重启后自动恢复，接着做没做完的事。
 
 ---
 
@@ -174,7 +203,13 @@ mods 目录位置：
 | `requestTimeoutMs` | `30000` | 请求超时 |
 | `maxRetries` | `2` | 失败重试次数 |
 | `decisionIntervalTicks` | `40` | 决策间隔（40 tick = 2 秒） |
-| `maxStepsPerSession` | `200` | 单次会话步数上限 |
+| `maxStepsPerSession` | `0` | 单次会话步数上限，**0 = 无限（长期自主模式）** |
+| `autoRestart` | `true` | 到达步数上限后自动续跑（仅在上限 > 0 时生效） |
+| `autoRespawn` | `true` | **死亡自动重生**（长期运行的关键） |
+| `respawnDelayTicks` | `100` | 重生前等待（5 秒），给掉落物留时间 |
+| `survivalReflex` | `true` | **生存反射**：血量/饥饿过低时绕过 LLM 自保 |
+| `stuckThreshold` | `3` | 连续失败多少次判定为卡住 |
+| `persistPlan` | `true` | 计划持久化，重启后接着做 |
 | `botName` | `AIBot` | 假玩家名字 |
 
 ---
@@ -186,10 +221,14 @@ mods 目录位置：
 ```
 /aibot spawn                          生成假玩家
 /aibot remove                         移除假玩家（同时停止自主循环）
-/aibot goal <自然语言>                 设置长期目标，例如 /aibot goal 建造一个石屋
-/aibot auto on                        开启自主循环
+/aibot goal <自然语言>                 设置长期目标（会清空旧计划并触发重新规划）
+/aibot auto on                        开启自主循环（无步数上限，持续运行）
 /aibot auto off                       停止自主循环
-/aibot status                         查看状态（含缓存命中率）
+/aibot status                         查看状态（含缓存命中率、计划进度、重生开关）
+/aibot plan show                      查看当前执行计划与进度
+/aibot plan clear                     清空计划（下一轮重新规划）
+/aibot landmark show                  查看已记录的地标及距离
+/aibot landmark clear                 清空地标记忆
 /aibot cache stats                    查看缓存统计与节省费用
 /aibot cache reset                    重置缓存统计
 /aibot memory show                    查看短期/长期记忆
@@ -199,18 +238,25 @@ mods 目录位置：
 /aibot config set <key> <value>       修改配置
 ```
 
-### 典型流程
+### 典型流程（长期挂机）
 
 ```
 /aibot config set apiKey sk-xxxx
 /aibot config set baseUrl https://api.deepseek.com
 /aibot spawn
-/aibot goal 砍 20 个木头并合成工作台
+/aibot goal 建造一个有工作台和箱子的石屋，然后持续挖矿积累资源
 /aibot auto on
-...
-/aibot auto off
-/aibot cache stats
 ```
+
+开了 `auto on` 之后就可以不管它了：它会自己拆解目标、执行、死亡重生、跳过做不到的任务。
+想看进展用 `/aibot plan show` 和 `/aibot status`，想停用 `/aibot auto off`。
+
+### 新增动作（LLM 可用）
+
+| 动作 | 说明 |
+|---|---|
+| `plan` | 把长期目标拆解成 3~6 个步骤写入任务栈 |
+| `remember` | 记录地标（home/chest/mine/farm/base），避免迷路 |
 
 ---
 
@@ -389,6 +435,7 @@ src/main/java/com/example/aibot/
 | `ServerPlayer` 构造 | **3 参数**（无 `ClientInformation`） | 4 参数 | 4 参数 | 4 参数 |
 | `ServerGamePacketListenerImpl` | **3 参数**（无 cookie） | 4 参数 | 4 参数 | 4 参数 |
 | `placeNewPlayer` | **2 参数** | 3 参数 | 3 参数 | 3 参数 |
+| `PlayerList.respawn` | **2 参数** | 3 参数 | 3 参数 | 3 参数 |
 | `bot.level()` | 返回 `Level` | 返回 `Level` | 返回 `ServerLevel` | 返回 `ServerLevel` |
 | 取得 `ServerLevel` | `serverLevel()` | `serverLevel()` | `level()` | `level()` |
 | 命令权限 | `hasPermission(2)` | `hasPermission(2)` | `permissions().hasPermission(...)` | 同左 |
@@ -398,6 +445,12 @@ src/main/java/com/example/aibot/
 | 造成伤害 | `hurt(DamageSource, float)` | `hurt(...)` | `hurtServer(ServerLevel, ...)` | `hurtServer(...)` |
 | 注册表读取 | `Registry.get(id)` | `Registry.get(id)` | `Registry.getValue(id)` | `Registry.getValue(id)` |
 | `isSolidRender` | 需 `(BlockGetter, BlockPos)` | 需参数 | 无参数 | 无参数 |
+| 物品堆比较 | `isSameItemSameTags` | `isSameItemSameComponents` | 同左 | 同左 |
+| **配方产物** | `getResultItem(RegistryAccess)` | `getResultItem(HolderLookup.Provider)` | **`display().result().resolveForFirstStack(...)`** | 同左 |
+| **配方材料** | `getIngredients()` | `getIngredients()` | **`placementInfo().ingredients()`** | 同左 |
+| **配方容器** | 直接 `Recipe<?>` | `RecipeHolder<?>` | `RecipeHolder<?>` | `RecipeHolder<?>` |
+| **掉落物品** | `drop(stack, false)` | 同左 | 同左 | **需加 `Prediction` 参数** |
+| **睡觉** | `startSleepInBed(pos)` | 同左 | 同左 | **`startSleepInBed(bedBlock, state, BedRule, pos)`** |
 | 服务器目录 | `getServerDirectory()` 返回 `File` | 同左 | 返回 `Path` | 返回 `Path` |
 | 映射 | mojmap | mojmap | mojmap | **无映射（26.1+ 不再混淆）** |
 | Loom 插件 | `fabric-loom-remap` | `fabric-loom-remap` | `fabric-loom-remap` | **`fabric-loom`** |
@@ -407,10 +460,16 @@ src/main/java/com/example/aibot/
 
 ## 12. 已知限制 / 后续可做
 
-* **`place` / `craft` / `sleep` / `store` 四个动作是预留接口**，当前返回「尚未实现」并写入失败记忆。
-  接口签名已定好，补实现即可。
-* **寻路是 MVP 版**：`move` / `pathfind` 采用「直线靠近 + 落地校验」，
-  不做真实地形寻路。需要真正寻路可接入 Baritone。
+* **寻路仍是 MVP 版**：`move` / `pathfind` 采用「直线靠近 + 落地校验」，
+  不做真实地形寻路，遇到山川河流会判定「无法到达」。
+  这是当前「打造帝国」最大的物理瓶颈，需要真正寻路可接入 Baritone。
+* **移动是瞬移而非行走**：`teleportTo` 直接落点，因此不会有真实行走动画、
+  也不会被地形阻挡。若需要「像真人一样走」，需改用逐 tick 的 `setDeltaMovement`。
+* **挖掘是瞬间完成**：`destroyBlock` 无视方块硬度与工具，不消耗耐久。
 * **假玩家同时只允许一个**（`FakePlayerManager` 单实例），简化设计。
+* **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 一个普通 `ServerPlayer`，
+  功能不受影响（所有执行器已按 `ServerPlayer` 编写），但若将来要覆写子类行为需注意。
+* **不会主动加载区块**：没有客户端，它所在区块若无其他玩家加载，
+  状态采集会跳过未加载的方块（代码已做 `isLoaded` 防护，不会报错）。
 * **LLM 输出解析**：已做「纯 JSON / 剥代码块 / 截取花括号」三重容错，
-  若模型仍频繁输出非 JSON，建议在 `StaticPrefix` 里强化格式约束（注意保持前缀稳定）。
+  若模型仍频繁输出非 JSON，建议在 `StaticPrefix` 里强化格式约束（注意保持前缀稳定以免掉缓存命中率）。

@@ -59,8 +59,51 @@ public class AIConfig {
     /** 自主循环决策间隔（tick）。40 tick = 2 秒。 */
     public int decisionIntervalTicks = 40;
 
-    /** 单次自主循环的最大连续步数，超过后自动暂停，防止无限消耗 token。 */
-    public int maxStepsPerSession = 200;
+    /**
+     * 单次自主循环的最大连续步数。
+     *
+     * <p><b>长期自主模式</b>：设为 0 或负数表示<b>不限制</b>，可以一直跑下去。
+     * 默认 0（无限），配合 {@link #autoRestart} 实现完全自主游玩。</p>
+     *
+     * <p>如果只想做成本控制，可以设成正数（如 2000），
+     * 到达上限后会写入存档并在服务器重启后自动续跑。</p>
+     */
+    public int maxStepsPerSession = 0;
+
+    /**
+     * 步数到达上限后是否自动重新开始（而不是彻底停止）。
+     * 仅在 {@link #maxStepsPerSession} > 0 时有意义。
+     */
+    public boolean autoRestart = true;
+
+    /**
+     * 死亡后是否自动重生并继续自主循环。
+     * 这是「完全自主游玩」的关键开关，默认 true。
+     */
+    public boolean autoRespawn = true;
+
+    /**
+     * 死亡重生前的等待 tick 数（默认 100 tick = 5 秒），
+     * 给死亡动画和掉落物留出时间。
+     */
+    public int respawnDelayTicks = 100;
+
+    /**
+     * 连续卡住（同一动作反复失败）多少次后，强制清空当前计划并重新规划。
+     * 防止在一个做不到的目标上无限空转烧 token。
+     */
+    public int stuckThreshold = 3;
+
+    /**
+     * 是否启用「自主生存反射」：血量过低自动逃跑/进食，夜晚自动睡觉。
+     * 这些反射在 LLM 决策之外独立生效，保证不会因为 LLM 判断失误而猝死。
+     */
+    public boolean survivalReflex = true;
+
+    /**
+     * 是否把当前计划（任务栈）持久化到 memory.json，服务器重启后接着做。
+     */
+    public boolean persistPlan = true;
 
     /** 单步超时（tick）。动作执行超过该时长视为卡住，触发换策略。 */
     public int stepTimeoutTicks = 200;

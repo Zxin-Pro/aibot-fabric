@@ -1,6 +1,5 @@
 package com.example.aibot.action;
 
-import com.example.aibot.entity.AIBotPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
@@ -53,9 +52,18 @@ public class ActionExecutor {
     /** 挖掘可触及距离。 */
     private static final double REACH_DISTANCE = 5.0;
 
-    protected final AIBotPlayer bot;
+    /**
+     * 被控制的假玩家。
+     *
+     * <p><b>为什么是 ServerPlayer 而不是 AIBotPlayer</b>：
+     * 原版 {@code PlayerList.respawn(...)} 内部会 {@code new ServerPlayer(...)}，
+     * 死亡重生后我们的 {@link AIBotPlayer} 子类实例会被替换成普通 {@code ServerPlayer}。
+     * 用父类型声明可以在重生后继续正常驱动，无需另写一套执行器
+     * （本类用到的全部方法都定义在 ServerPlayer/Entity/Player 上）。</p>
+     */
+    protected final net.minecraft.server.level.ServerPlayer bot;
 
-    public ActionExecutor(AIBotPlayer bot) {
+    public ActionExecutor(net.minecraft.server.level.ServerPlayer bot) {
         this.bot = bot;
     }
 
@@ -323,22 +331,251 @@ public class ActionExecutor {
     }
 
     // ------------------------------------------------------------------
-    // 预留接口：MVP 阶段返回「未实现」，但保留完整签名便于后续填充
+    // 建造与合成（长期自主运行的必备能力）
     // ------------------------------------------------------------------
 
-    /** 放置方块。TODO: 后续实现（需要从背包取出对应方块并调用 useOn）。 */
+    /**
+     * 放置方块。
+     *
+     * <p>实现方式：从背包找到对应方块物品 → 在目标位置直接写入方块状态并扣掉一个物品。
+     * 不走 {@code BlockItem.useOn} 的上下文流程，因为假玩家没有真正的"手持交互"，
+     * 直接写世界更可靠、也更容易预测。</p>
+     *
+     * <p>坐标缺省时放在假玩家脚下前方一格。</p>
+     */
     protected ActionResult place(ActionParser.ParsedAction parsed) {
         String blockId = parsed.getString("block", "");
-        return ActionResult.fail("place 动作尚未实现（计划中）: " + blockId);
+        if (blockId.isEmpty()) {
+            return ActionResult.fail("place 动作缺少 block 参数");
+        }
+
+        ServerLevel level = bot.level();
+        Block target = resolveBlock(blockId);
+        if (target == null) {
+            return ActionResult.fail("未知方块: " + blockId);
+        }
+
+        // 目标坐标：缺省为玩家前方一格
+        BlockPos base = bot.blockPosition();
+        int dx = parsed.getInt("x", 1);
+        int dy = parsed.getInt("y", 0);
+        int dz = parsed.getInt("z", 0);
+        BlockPos pos = base.offset(dx, dy, dz);
+
+        if (!level.isLoaded(pos)) {
+            return ActionResult.fail("目标位置所在区块未加载");
+        }
+        // 不覆盖已有实体方块（避免把建筑挖穿）
+        BlockState existing = level.getBlockState(pos);
+        if (!existing.isAir() && existing.isSolidRender()) {
+            return ActionResult.fail("目标位置已被 " + shortId(blockIdOf(existing)) + " 占据");
+        }
+        // 从背包找这个方块物品
+        int slot = findBlockItemSlot(target);
+        if (slot < 0) {
+            // 创造模式兜底：没有物品也允许放置
+            if (bot.isCreative()) {
+                level.setBlockAndUpdate(pos, target.defaultBlockState());
+                return ActionResult.ok("已在 (" + pos.getX() + "," + pos.getY() + "," + pos.getZ()
+                        + ") 放置 " + shortId(blockId) + "（创造模式）");
+            }
+            return ActionResult.fail("背包里没有 " + shortId(blockId));
+        }
+
+        // 写入方块并扣物品
+        boolean placed = level.setBlockAndUpdate(pos, target.defaultBlockState());
+        if (!placed) {
+            return ActionResult.fail("放置失败（位置不合法）");
+        }
+        bot.getInventory().removeItem(slot, 1);
+
+        return ActionResult.ok("已在 (" + pos.getX() + "," + pos.getY() + "," + pos.getZ()
+                + ") 放置 " + shortId(blockId));
     }
 
-    /** 合成物品。TODO: 后续实现（需要匹配配方并消耗材料）。 */
+    /**
+     * 合成物品。
+     *
+     * <p><b>1.21.11 的配方 API 与旧版完全不同</b>（这是本版本最需要留意的改动之一）：
+     * <ul>
+     *   <li>旧版：{@code recipe.getResultItem(registryAccess)} / {@code recipe.getIngredients()}</li>
+     *   <li>1.21.11：结果要通过 {@code recipe.display()} 拿到 {@code RecipeDisplay}，
+     *       再 {@code display.result().resolveForFirstStack(...)}；
+     *       材料要从 {@code recipe.placementInfo().ingredients()} 取。</li>
+     * </ul>
+     * 这里按新 API 实现。这样可以避开原版合成界面（假玩家没有界面），
+     * 同时仍然尊重真实配方——材料不够就是合成不了。</p>
+     */
     protected ActionResult craft(ActionParser.ParsedAction parsed) {
-        String item = parsed.getString("item", "");
-        return ActionResult.fail("craft 动作尚未实现（计划中）: " + item);
+        String itemId = parsed.getString("item", "");
+        int count = Math.max(1, Math.min(parsed.getInt("count", 1), 64));
+        if (itemId.isEmpty()) {
+            return ActionResult.fail("craft 动作缺少 item 参数");
+        }
+
+        String full = itemId.contains(":") ? itemId : "minecraft:" + itemId;
+        Identifier key = Identifier.parse(full);
+        if (key == null) {
+            return ActionResult.fail("非法物品 ID: " + itemId);
+        }
+        // Registry.getValue(Identifier) 直接返回 T，比 get() 的 Optional<Holder> 更方便
+        net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.getValue(key);
+        if (targetItem == null || targetItem == Items.AIR) {
+            return ActionResult.fail("未知物品: " + itemId);
+        }
+
+        ServerLevel level = bot.level();
+        var recipes = level.getServer().getRecipeManager();
+        var ctx = net.minecraft.world.item.crafting.display.SlotDisplayContext.fromLevel(level);
+
+        net.minecraft.world.item.crafting.RecipeHolder<?> matchedRecipe = null;
+        ItemStack matchedResult = ItemStack.EMPTY;
+        boolean recipeExists = false;
+
+        for (var holder : recipes.getRecipes()) {
+            ItemStack result = resultOf(holder.value(), ctx);
+            if (result.isEmpty() || !result.is(targetItem)) {
+                continue;
+            }
+            recipeExists = true;
+            // 找到配方后还要确认材料齐全
+            if (hasIngredients(holder.value())) {
+                matchedRecipe = holder;
+                matchedResult = result;
+                break;
+            }
+        }
+
+        if (matchedRecipe == null || matchedResult.isEmpty()) {
+            return ActionResult.fail(recipeExists
+                    ? "材料不足，无法合成 " + shortId(full)
+                    : "找不到合成 " + shortId(full) + " 的配方（可能需要工作台或特殊结构）");
+        }
+
+        // 消耗材料
+        consumeIngredients(matchedRecipe.value());
+
+        // 放入产物
+        int perCraft = Math.max(1, matchedResult.getCount());
+        int total = perCraft * count;
+        while (total > 0) {
+            int batch = Math.min(perCraft, total);
+            ItemStack out = matchedResult.copy();
+            out.setCount(batch);
+            if (!bot.getInventory().add(out)) {
+                // 背包满：掉落在地上
+                bot.drop(out, false);
+            }
+            total -= batch;
+        }
+
+        return ActionResult.ok("合成了 " + count + " 份 " + shortId(full)
+                + "（共 " + (perCraft * count) + " 个）");
     }
 
-    /** 攻击目标。TODO: 后续实现（需要计算攻击冷却与击退）。 */
+    /**
+     * 取配方的产物（适配 1.21.11 的 RecipeDisplay 体系）。
+     *
+     * @return 产物物品堆；无法解析时返回空堆
+     */
+    protected ItemStack resultOf(net.minecraft.world.item.crafting.Recipe<?> recipe,
+                                 net.minecraft.util.context.ContextMap ctx) {
+        try {
+            var displays = recipe.display();
+            if (displays == null || displays.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            // 取第一个展示项的结果槽位
+            var slot = displays.get(0).result();
+            if (slot == null) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack s = slot.resolveForFirstStack(ctx);
+            return s == null ? ItemStack.EMPTY : s;
+        } catch (Throwable t) {
+            return ItemStack.EMPTY;
+        }
+    }
+
+    /** 检查玩家背包是否满足某配方的全部材料。 */
+    protected boolean hasIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
+        try {
+            // 1.21.11 用 placementInfo().ingredients()（旧版是 getIngredients()）
+            var info = recipe.placementInfo();
+            if (info == null) {
+                return false;
+            }
+            var ingredients = info.ingredients();
+            if (ingredients == null || ingredients.isEmpty()) {
+                return false;
+            }
+            for (var ing : ingredients) {
+                if (ing == null || ing.isEmpty()) {
+                    continue; // 空槽位在有序配方中是允许的
+                }
+                if (!hasIngredient(ing)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 背包里是否有某个 Ingredient 需要的物品。 */
+    protected boolean hasIngredient(net.minecraft.world.item.crafting.Ingredient ing) {
+        var inv = bot.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && ing.test(s)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 消耗一次配方所需的材料。 */
+    protected void consumeIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
+        try {
+            var info = recipe.placementInfo();
+            if (info == null) {
+                return;
+            }
+            var inv = bot.getInventory();
+            for (var ing : info.ingredients()) {
+                if (ing == null || ing.isEmpty()) {
+                    continue;
+                }
+                for (int i = 0; i < inv.getContainerSize(); i++) {
+                    ItemStack s = inv.getItem(i);
+                    if (!s.isEmpty() && ing.test(s)) {
+                        s.shrink(1);
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            LOGGER.log(Level.WARNING, "[AIBot] 消耗合成材料时异常", t);
+        }
+    }
+
+    /** 在背包中查找能放置出指定方块的物品槽位。 */
+    protected int findBlockItemSlot(Block block) {
+        var inv = bot.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (s.getItem() instanceof net.minecraft.world.item.BlockItem bi && bi.getBlock() == block) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** 攻击目标。 */
     protected ActionResult attack(ActionParser.ParsedAction parsed) {
         String target = parsed.getString("target", "");
         // 先做一个最小可用版本：攻击最近的敌对生物
@@ -384,16 +621,6 @@ public class ActionExecutor {
                 BuiltInRegistries.ENTITY_TYPE.getKey(threat.getType()))));
     }
 
-    /** 睡觉。TODO: 后续实现的完整版本需要检查是否夜晚与床的存在。 */
-    protected ActionResult sleep(ActionParser.ParsedAction parsed) {
-        ServerLevel level = bot.level();
-        long dayTime = level.getDayTime() % 24000L;
-        if (dayTime < 13000L) {
-            return ActionResult.fail("现在是白天，无法睡觉");
-        }
-        return ActionResult.fail("sleep 动作尚未实现（计划中）");
-    }
-
     /** 跟随玩家。TODO: 后续实现（需要每 tick 跟踪目标玩家位置）。 */
     protected ActionResult follow(ActionParser.ParsedAction parsed) {
         String playerName = parsed.getString("player", "");
@@ -416,9 +643,189 @@ public class ActionExecutor {
         return ActionResult.fail("找不到玩家 " + playerName);
     }
 
-    /** 存放物品到容器。TODO: 后续实现（需要扫描附近容器方块实体）。 */
+    /**
+     * 睡觉。
+     *
+     * <p>实现：夜晚时寻找最近的床并让假玩家上床。
+     * 找不到床时返回失败，让 LLM 去造一张床（羊毛 + 木板）。</p>
+     */
+    protected ActionResult sleep(ActionParser.ParsedAction parsed) {
+        ServerLevel level = bot.level();
+
+        // 坐标可选：给了就用给的，没给就找最近的床
+        BlockPos bedPos = null;
+        if (parsed.has("x")) {
+            bedPos = BlockPos.containing(parsed.getDouble("x", 0),
+                    parsed.getDouble("y", 0), parsed.getDouble("z", 0));
+            if (!(level.getBlockState(bedPos).getBlock() instanceof net.minecraft.world.level.block.BedBlock)) {
+                bedPos = null; // 指定位置不是床，退化为自动寻找
+            }
+        }
+        if (bedPos == null) {
+            BlockPos found = findNearestBlockOfType(level, net.minecraft.world.level.block.BedBlock.class, 24);
+            if (found == null) {
+                return ActionResult.fail("附近 24 格内找不到床");
+            }
+            bedPos = found;
+        }
+
+        // 走到床边
+        double dist = Math.sqrt(bot.blockPosition().distSqr(bedPos));
+        if (dist > 3.0) {
+            BlockPos stand = findGroundBelow(level, bedPos);
+            if (stand != null) {
+                bot.teleportTo(stand.getX() + 0.5, stand.getY(), stand.getZ() + 0.5);
+            }
+        }
+
+        // 真正上床（原版方法会处理昼夜与怪物判定）
+        try {
+            var result = bot.startSleepInBed(bedPos);
+            if (result.left().isPresent()) {
+                // BedSleepingProblem 在 1.21.11 是 record，用 message() 取可读文本
+                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
+            }
+            return ActionResult.ok("已上床睡觉");
+        } catch (Throwable t) {
+            LOGGER.log(Level.WARNING, "[AIBot] 睡觉失败", t);
+            return ActionResult.fail("睡觉异常: " + t.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * 把背包物品存入附近容器（箱子、桶等）。
+     *
+     * <p>实现：扫描附近 8 格内的方块实体，找到实现了 {@code Container} 的容器，
+     * 把指定物品（或全部可存物品）转移进去。这是"整理背包"和建立基地仓储的关键。</p>
+     */
     protected ActionResult store(ActionParser.ParsedAction parsed) {
-        return ActionResult.fail("store 动作尚未实现（计划中）");
+        String wanted = parsed.getString("item", "");
+        ServerLevel level = bot.level();
+
+        // 1. 找最近的容器
+        net.minecraft.world.Container container = findNearestContainer(level, 8);
+        if (container == null) {
+            return ActionResult.fail("附近 8 格内没有可用的容器（箱子/桶）");
+        }
+
+        var inv = bot.getInventory();
+        int movedCount = 0;
+        int movedKinds = 0;
+
+        // 2. 逐个槽位转移
+        // 注意：跳过快捷栏前 9 格，避免把正在用的工具存走
+        for (int i = 9; i < inv.getContainerSize(); i++) {
+            ItemStack stack = inv.getItem(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            // 指定了物品就精确匹配
+            if (!wanted.isEmpty()) {
+                Identifier key = BuiltInRegistries.ITEM.getKey(stack.getItem());
+                if (key == null || !key.toString().equals(wanted)
+                        && !key.toString().equals("minecraft:" + wanted)) {
+                    continue;
+                }
+            }
+
+            int before = stack.getCount();
+            ItemStack remaining = insertIntoContainer(container, stack);
+            int moved = before - remaining.getCount();
+            if (moved > 0) {
+                movedCount += moved;
+                movedKinds++;
+                inv.setItem(i, remaining);
+            }
+        }
+
+        if (movedCount == 0) {
+            return ActionResult.fail(wanted.isEmpty()
+                    ? "容器已满或没有可存入的物品"
+                    : "没有可存入的 " + shortId(wanted));
+        }
+        container.setChanged();
+        return ActionResult.ok("存入 " + movedKinds + " 种物品，共 " + movedCount + " 个");
+    }
+
+    /**
+     * 把物品堆尽量塞进容器。
+     *
+     * @return 没塞进去的剩余部分（全部塞入时返回空堆）
+     */
+    protected ItemStack insertIntoContainer(net.minecraft.world.Container container, ItemStack stack) {
+        for (int i = 0; i < container.getContainerSize() && !stack.isEmpty(); i++) {
+            ItemStack slot = container.getItem(i);
+            // 空槽：直接放
+            if (slot.isEmpty()) {
+                container.setItem(i, stack.copy());
+                return ItemStack.EMPTY;
+            }
+            // 同类物品：合并
+            if (ItemStack.isSameItemSameComponents(slot, stack)) {
+                int max = Math.min(container.getMaxStackSize(), slot.getMaxStackSize());
+                int space = max - slot.getCount();
+                if (space > 0) {
+                    int move = Math.min(space, stack.getCount());
+                    slot.grow(move);
+                    stack.shrink(move);
+                    container.setItem(i, slot);
+                }
+            }
+        }
+        return stack;
+    }
+
+    /** 找最近的实现了 Container 的方块实体。 */
+    protected net.minecraft.world.Container findNearestContainer(ServerLevel level, int radius) {
+        BlockPos center = bot.blockPosition();
+        net.minecraft.world.Container best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -4; dy <= 4; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = center.offset(dx, dy, dz);
+                    if (!level.isLoaded(pos)) {
+                        continue;
+                    }
+                    var be = level.getBlockEntity(pos);
+                    if (be instanceof net.minecraft.world.Container c) {
+                        double d = center.distSqr(pos);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = c;
+                        }
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /** 在半径内寻找最近的指定类型的方块（如床）。 */
+    protected BlockPos findNearestBlockOfType(ServerLevel level, Class<?> blockClass, int radius) {
+        BlockPos center = bot.blockPosition();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -5; dy <= 5; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos pos = center.offset(dx, dy, dz);
+                    if (!level.isLoaded(pos)) {
+                        continue;
+                    }
+                    if (blockClass.isInstance(level.getBlockState(pos).getBlock())) {
+                        double d = center.distSqr(pos);
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = pos.immutable();
+                        }
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------
@@ -515,5 +922,11 @@ public class ActionExecutor {
             return "";
         }
         return id.startsWith("minecraft:") ? id.substring("minecraft:".length()) : id;
+    }
+
+    /** 取方块状态的注册 ID 字符串。 */
+    protected static String blockIdOf(BlockState state) {
+        Identifier key = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+        return key == null ? "unknown" : key.toString();
     }
 }
