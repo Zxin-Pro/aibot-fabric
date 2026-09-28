@@ -146,13 +146,35 @@ public final class ContextCompressor {
             absorb(all.subList(0, overflow));
         }
 
-        // 2. 取最近窗口内的细节
+        // 2. 渲染：摘要在前（旧），最近细节在后（新）
+        StringBuilder sb = new StringBuilder(1024);
+
+        if (!summaries.isEmpty()) {
+            sb.append("【历史摘要（更早的经历，已压缩）】\n");
+            for (Summary s : summaries) {
+                sb.append("  ").append(s.render()).append('\n');
+            }
+        }
+
+        sb.append("【最近细节】\n");
         List<ShortTermMemory.Entry> recent = overflow > 0
                 ? new ArrayList<>(all.subList(overflow, all.size()))
                 : all;
+        if (recent.isEmpty()) {
+            sb.append("  (暂无)\n");
+        } else {
+            for (ShortTermMemory.Entry e : recent) {
+                sb.append("  #").append(e.step())
+                        .append(e.success() ? " [成功] " : " [失败] ")
+                        .append(e.action());
+                if (!e.params().isEmpty()) {
+                    sb.append('(').append(e.params()).append(')');
+                }
+                sb.append(" -> ").append(e.result()).append('\n');
+            }
+        }
 
-        // 3. 渲染 + 按预算裁剪
-        return enforceBudget(render(summaries, recent), recent);
+        return enforceBudget(sb.toString().trim());
     }
 
     /**
@@ -211,77 +233,50 @@ public final class ContextCompressor {
     }
 
     /**
-     * 按 token 预算裁剪。
-     *
-     * <p>策略：先丢弃最早的摘要（细节比摘要宝贵，最后才动细节）；
-     * 摘要丢光仍超预算时，硬截断细节并保留尾部 —— 因为最近发生的事
-     * 对决策最重要。</p>
-     *
-     * <p>实现上直接重新渲染，而不是对字符串做外科手术：
-     * 后者容易让「渲染结果」与「summaries 状态」悄悄失步。</p>
+     * 按 token 预算裁剪：超预算时优先丢弃最早的摘要（细节更宝贵，最后才动）。
      */
-    private String enforceBudget(String text,
-                                 List<ShortTermMemory.Entry> recent) {
+    private String enforceBudget(String text) {
         if (estimateTokens(text) <= tokenBudget) {
             return text;
         }
-
-        // 逐步丢弃最早的摘要，每次重新渲染
-        List<Summary> kept = new ArrayList<>(summaries);
-        while (!kept.isEmpty()) {
-            kept.remove(0);
-            String candidate = render(kept, recent);
-            if (estimateTokens(candidate) <= tokenBudget) {
-                // 采纳这个更省的版本
-                summaries.clear();
-                summaries.addAll(kept);
-                return candidate;
-            }
+        // 逐步丢弃最早的摘要，直到落进预算
+        while (!summaries.isEmpty() && estimateTokens(text) > tokenBudget) {
+            summaries.removeFirst();
+            text = rebuildWithoutOldest(text);
         }
-
-        // 摘要全丢光还是超预算：说明细节本身就太长，硬截断并保留尾部
-        summaries.clear();
-        String bare = render(summaries, recent);
-        int approxChars = Math.max(200, tokenBudget * 2);
-        if (bare.length() > approxChars) {
+        if (estimateTokens(text) <= tokenBudget) {
+            return text;
+        }
+        // 摘要丢光了还是超：只能硬截断细节（保留尾部，因为最近的最重要）
+        int approxChars = tokenBudget * 2;
+        if (text.length() > approxChars) {
             return "（早期内容因超出上下文预算已省略）\n"
-                    + bare.substring(bare.length() - approxChars);
+                    + text.substring(text.length() - approxChars);
         }
-        return bare;
+        return text;
     }
 
-    /**
-     * 重新渲染压缩结果（摘要 + 最近细节）。
-     *
-     * @param summaryList 要渲染的摘要列表
-     * @param recent      最近细节
-     */
-    private String render(java.util.Collection<Summary> summaryList,
-                          List<ShortTermMemory.Entry> recent) {
-        StringBuilder sb = new StringBuilder(1024);
-
-        if (!summaryList.isEmpty()) {
-            sb.append("【历史摘要（更早的经历，已压缩）】\n");
-            for (Summary s : summaryList) {
-                sb.append("  ").append(s.render()).append('\n');
-            }
+    /** 丢掉当前文本里最旧的一条摘要行，返回重建后的文本。 */
+    private String rebuildWithoutOldest(String text) {
+        int start = text.indexOf("【历史摘要");
+        if (start < 0) {
+            return text;
         }
-
-        sb.append("【最近细节】\n");
-        if (recent.isEmpty()) {
-            sb.append("  (暂无)\n");
-        } else {
-            for (ShortTermMemory.Entry e : recent) {
-                sb.append("  #").append(e.step())
-                        .append(e.success() ? " [成功] " : " [失败] ")
-                        .append(e.action());
-                if (!e.params().isEmpty()) {
-                    sb.append('(').append(e.params()).append(')');
-                }
-                sb.append(" -> ").append(e.result()).append('\n');
-            }
+        int detailStart = text.indexOf("【最近细节】");
+        if (detailStart < 0) {
+            return text;
         }
-        return sb.toString().trim();
+        // 摘要在中间：去掉紧跟标题的第一行摘要
+        int firstLineEnd = text.indexOf('\n', start);
+        if (firstLineEnd < 0 || firstLineEnd >= detailStart) {
+            return text;
+        }
+        int secondLineEnd = text.indexOf('\n', firstLineEnd + 1);
+        if (secondLineEnd < 0 || secondLineEnd > detailStart) {
+            // 只剩最后一条摘要：整个标题块去掉
+            return text.substring(0, start) + text.substring(detailStart);
+        }
+        return text.substring(0, firstLineEnd + 1) + text.substring(secondLineEnd + 1);
     }
 
     /** 清空压缩状态（/aibot memory clear 时调用）。 */

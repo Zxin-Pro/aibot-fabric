@@ -16,8 +16,6 @@ import java.util.ArrayList;
  * 从而决定是否用 chat 动作回话。</p>
  *
  * <p>格式稳定、有上限，避免长跑时无界增长影响缓存与前缀一致性。</p>
- *
- * <p>本类不引用任何 Minecraft 类，纯数据，各版本线共用。</p>
  */
 public final class ChatMemory {
 

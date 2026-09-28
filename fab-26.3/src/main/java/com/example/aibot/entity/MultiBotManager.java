@@ -185,12 +185,23 @@ public final class MultiBotManager {
             if (config.persistPlan) {
                 loop.restorePlan(ltm.loadPlan());
             }
-            loop.setGoal(profile.goal);
+            // 目标优先级：档案里保存的 > 配置里的默认目标 > 空（自行决定）
+            String effectiveGoal = profile.goal;
+            if (effectiveGoal == null || effectiveGoal.trim().isEmpty()) {
+                effectiveGoal = config.defaultGoal == null ? "" : config.defaultGoal.trim();
+            }
+            loop.setGoal(effectiveGoal);
 
             agents.put(name, agent);
 
-            if (profile.autoLoop) {
+            // 是否自动开始：
+            //  - 档案里已标记 autoLoop 的（老档案/服务器重启恢复）→ 开始
+            //  - 配置开启 autoStartOnSpawn（默认开）→ 新生成的也开始
+            // 这样玩家 spawn 完就不用管了。
+            boolean shouldStart = profile.autoLoop || config.autoStartOnSpawn;
+            if (shouldStart) {
                 loop.start();
+                profile.autoLoop = true;
             }
 
             LOGGER.info("[AIBot] 智能体已生成: " + name

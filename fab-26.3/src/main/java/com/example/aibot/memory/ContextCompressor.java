@@ -113,6 +113,15 @@ public final class ContextCompressor {
     /** 累计压缩掉的原始记录数（用于 /aibot status 展示「省了多少」）。 */
     private long compressedCount = 0;
 
+    /**
+     * 已吸收过的最大步号（高水位线）。
+     *
+     * <p>用它去重，而不是看 pending 的末尾元素 ——
+     * pending 被批量清空后末尾会「倒退」，导致老记录被重复吸收、
+     * 摘要里出现重复内容。高水位线是单调递增的，不会退。</p>
+     */
+    private long absorbedUpTo = Long.MIN_VALUE;
+
     public ContextCompressor() {
         this(DEFAULT_WINDOW, DEFAULT_TOKEN_BUDGET);
     }
@@ -173,12 +182,14 @@ public final class ContextCompressor {
      */
     private void absorb(List<ShortTermMemory.Entry> overflowed) {
         for (ShortTermMemory.Entry e : overflowed) {
-            // 避免重复吸收（compress 会被反复调用）
-            if (!pending.isEmpty() && e.step() <= pending.get(pending.size() - 1).step()) {
+            // 用单调高水位线去重：compress 会被反复调用，
+            // 每次都传入同一批已滑出的记录，必须保证只吸收一次。
+            if (e.step() <= absorbedUpTo) {
                 continue;
             }
             pending.add(e);
             compressedCount++;
+            absorbedUpTo = e.step();
         }
         while (pending.size() >= SUMMARY_BATCH) {
             List<ShortTermMemory.Entry> batch = new ArrayList<>(pending.subList(0, SUMMARY_BATCH));
@@ -268,11 +279,12 @@ public final class ContextCompressor {
         return text.substring(0, firstLineEnd + 1) + text.substring(secondLineEnd + 1);
     }
 
-    /** 清空压缩状态（/aibot context clear 时调用）。 */
+    /** 清空压缩状态（/aibot memory clear 时调用）。 */
     public synchronized void clear() {
         summaries.clear();
         pending.clear();
         compressedCount = 0;
+        absorbedUpTo = Long.MIN_VALUE;
     }
 
     /** 已压缩掉的原始记录数。 */

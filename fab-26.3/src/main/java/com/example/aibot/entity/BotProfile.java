@@ -17,7 +17,7 @@ import java.util.UUID;
  * 同时跑多个智能体时，每个必须有独立的 UUID、独立记忆、
  * 独立目标，否则它们会互相覆盖记忆文件、互相抢同一个实体。</p>
  *
- * <p>本类不引用任何 Minecraft 类，纯数据，各版本线共用。</p>
+ * <p>本类不引用任何 Minecraft 类，纯数据，四版本共用。</p>
  */
 public final class BotProfile {
 
@@ -97,9 +97,6 @@ public final class BotProfile {
      * 同一个名字永远得到同一个 UUID，因此：
      * 移除后重新 spawn，仍然被服务器认为是同一个玩家，
      * 背包与统计数据得以延续 —— 这正是 Carpet 假玩家的行为。</p>
-     *
-     * <p>命名空间与 {@code AIBotPlayer.offlineUuid} 保持一致，
-     * 否则同名的 AIBotPlayer 与自己算出的 UUID 会对不上。</p>
      */
     public UUID uuid() {
         return UUID.nameUUIDFromBytes(("aibot-fake-player:" + name)

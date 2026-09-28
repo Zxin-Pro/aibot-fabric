@@ -157,8 +157,10 @@ public class Aibot implements ModInitializer {
             this.botManager = new MultiBotManager(config, this.cacheStats, this.llmClient, gameDir);
             this.loopRegistry = new AutoLoopRegistry(this.botManager);
 
+            // 命令层需要读取 LLM 客户端（cache probe / upstream 诊断），
+            // 用 Supplier 注入而不是直接持有，避免初始化顺序耦合。
             this.command = new AIBotCommand(this.configStore, this.profileStore, this.cacheStats,
-                    this.botManager, () -> this.server);
+                    this.botManager, () -> this.server, () -> this.llmClient);
 
             LOGGER.info("[AIBot] 组件已就绪，配置文件: {}", this.configStore.getConfigFile().toAbsolutePath());
 
@@ -171,6 +173,9 @@ public class Aibot implements ModInitializer {
             LOGGER.info("[AIBot] 上下文压缩：窗口 {} 条，预算 {} token",
                     config.contextWindow, config.contextTokenBudget);
             LOGGER.info("[AIBot] 智能体上限：{} 个", config.maxBots);
+            LOGGER.info("[AIBot] 自主模式：{}，spawn 后自动开始：{}",
+                    config.autonomousMode ? "开启（无人干预时自主游玩）" : "关闭",
+                    config.autoStartOnSpawn ? "是" : "否");
 
             LOGGER.warn("[AIBot] 提醒：智能体会自动修改世界，长期挂机前请务必备份存档！");
 

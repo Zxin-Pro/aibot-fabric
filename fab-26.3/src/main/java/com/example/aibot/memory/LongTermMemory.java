@@ -148,7 +148,7 @@ public final class LongTermMemory {
             file.successes = new ArrayList<>(this.successes);
             file.failures = new ArrayList<>(this.failures);
 
-            Path tmp = this.memoryFile.resolveSibling(this.memoryFile.getFileName() + ".tmp");
+            Path tmp = this.memoryFile.resolveSibling("memory.json.tmp");
             Files.write(tmp, GSON.toJson(file).getBytes(StandardCharsets.UTF_8));
             try {
                 Files.move(tmp, this.memoryFile,
