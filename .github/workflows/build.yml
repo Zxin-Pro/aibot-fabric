@@ -1,0 +1,224 @@
+name: Build All Versions
+
+# ============================================================
+# AIBot 全版本构建
+#
+# 为什么必须用 CI 而不是本地：
+#   Loom 1.17.x 要求启动 Gradle 的 JVM 是 Java 21+，
+#   而本项目的开发沙箱（PRoot）无法执行 Java 21 的 JIT
+#   （mmap 可执行页被拦截）。CI 是唯一可靠的构建环境。
+#
+# 矩阵来源：version-matrix.yml 里 status=ready 的条目。
+# 新增版本线时，改那个文件即可，这里不用动。
+# ============================================================
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'fab-*/**'
+      - '.github/workflows/build.yml'
+      - 'version-matrix.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      only:
+        description: '只构建指定模块（逗号分隔，如 fab-1.21.1）。留空则全部。'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------
+  # 读取矩阵：从 version-matrix.yml 生成构建列表
+  # ------------------------------------------------------------
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.gen.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成构建矩阵
+        id: gen
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF' >> "$GITHUB_OUTPUT"
+          import re, sys, os, json
+
+          path = 'version-matrix.yml'
+          if not os.path.exists(path):
+              print('modules=[]', file=sys.stdout)
+              sys.exit(0)
+
+          # 极简 YAML 解析：只认我们需要的那几个标量字段，
+          # 避免为了 CI 引入额外的解析依赖。note 用 > 折叠块，跳过即可。
+          entries = []
+          cur = None
+          in_note = False
+          for raw in open(path, encoding='utf-8'):
+              line = raw.rstrip('\n')
+              stripped = line.strip()
+
+              if stripped.startswith('#') or not stripped:
+                  continue
+
+              m = re.match(r'^\s*-\s*id:\s*(\S+)\s*$', line)
+              if m:
+                  cur = {'id': m.group(1)}
+                  entries.append(cur)
+                  in_note = False
+                  continue
+
+              if cur is None:
+                  continue
+
+              # note 折叠块：缩进比 key 深，且不以已知 key 开头
+              m = re.match(r'^\s*(express|minecraft|covers|java|loader|fabricApi|loom|gradle|status):\s*(.*)$', line)
+              if m:
+                  k, v = m.group(1), m.group(2).strip().strip('"').strip("'")
+                  cur[k] = v
+                  in_note = (k == 'note')
+                  continue
+
+              if 'note:' in line:
+                  in_note = True
+                  continue
+
+          only = os.environ.get('ONLY', '')
+          only_set = set(x.strip() for x in only.split(',') if x.strip())
+
+          out = []
+          for e in entries:
+              if e.get('status') != 'ready':
+                  continue
+              if only_set and e['id'] not in only_set:
+                  continue
+              out.append({
+                  'id': e['id'],
+                  'mc': e.get('minecraft', ''),
+                  'java': e.get('java', '21'),
+              })
+
+          print('modules=' + json.dumps(out))
+          PYEOF
+        env:
+          ONLY: ${{ github.event.inputs.only }}
+
+      - name: 矩阵内容
+        run: echo '${{ steps.gen.outputs.modules }}'
+
+  # ------------------------------------------------------------
+  # 并行构建每个模块
+  # ------------------------------------------------------------
+  build:
+    needs: matrix
+    if: needs.matrix.outputs.modules != '[]' && needs.matrix.outputs.modules != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.matrix.outputs.modules) }}
+    name: build ${{ matrix.module.id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK ${{ matrix.module.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.module.java }}
+
+      # 旧版本线的 Gradle 版本各不相同，由各自的 wrapper 决定，
+      # 这里额外准备多个 JDK 供 toolchain 使用（1.20.1 线要 17，26.x 线要 25）。
+      - name: 准备额外 JDK（toolchain 用）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            21
+            25
+        continue-on-error: true
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ matrix.module.id }}-${{ hashFiles(format('{0}/gradle.properties', matrix.module.id)) }}
+          restore-keys: |
+            gradle-${{ matrix.module.id }}-
+
+      - name: 构建 ${{ matrix.module.id }}
+        id: build
+        working-directory: ${{ matrix.module.id }}
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          # CI 环境里 toolchain 路径与开发者本机不同，覆盖掉本机路径设置，
+          # 让 foojay 从已安装的 JDK 里挑（setup-java 已经把 17/21/25 装好了）。
+          sed -i '/org.gradle.java.installations.paths/d' gradle.properties || true
+          echo "org.gradle.java.installations.auto-download=true" >> gradle.properties
+          ./gradlew build --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: 收集产物
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          found=$(find "${{ matrix.module.id }}/build/libs" -name '*.jar' \
+                  ! -name '*-sources.jar' ! -name '*-dev.jar' 2>/dev/null | head -5 || true)
+          if [ -z "$found" ]; then
+            echo "### ⚠️ ${{ matrix.module.id }} 未产出 jar" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -60 "${{ matrix.module.id }}/build.log" >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "(无日志)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+          cp $found artifacts/
+          ls -la artifacts/
+          echo "### ✅ ${{ matrix.module.id }} 构建成功" >> $GITHUB_STEP_SUMMARY
+          for f in artifacts/*.jar; do
+            sz=$(stat -c%s "$f")
+            echo "- \`$(basename "$f")\` ($(( sz / 1024 )) KB)" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-${{ matrix.module.id }}
+          path: artifacts/*.jar
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ matrix.module.id }}
+          path: ${{ matrix.module.id }}/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ------------------------------------------------------------
+  # 汇总
+  # ------------------------------------------------------------
+  summary:
+    needs: [matrix, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 结果汇总
+        run: |
+          echo "## 构建结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "矩阵模块数：$(echo '${{ needs.matrix.outputs.modules }}' | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null || echo '?')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "构建状态：${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY

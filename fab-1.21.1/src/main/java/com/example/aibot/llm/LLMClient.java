@@ -7,7 +7,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,16 +23,23 @@ import java.util.logging.Logger;
 /**
  * OpenAI 兼容格式的 LLM 异步客户端。
  *
- * <p>特性：</p>
- * <ul>
- *   <li>基于 JDK 11+ 的 {@link HttpClient} 异步发送，完全不阻塞 Minecraft 主线程</li>
- *   <li>超时、重试（仅对网络错误与 5xx 重试，4xx 直接失败）、限流</li>
- *   <li>解析 usage 中的缓存命中字段（DeepSeek 与 OpenAI 两种命名都支持）</li>
- *   <li>统计信息汇总到 {@link CacheStats}</li>
- * </ul>
+ * <p><b>面向中转站的设计</b>（与旧版最大的区别）：</p>
+ * <ol>
+ *   <li><b>缓存字段自适应</b>：通过 {@link CacheUsageParser} 兼容 DeepSeek /
+ *       OpenAI / Anthropic 转译 / 国内厂商等所有已知命名，
+ *       并在完全未上报时如实标记，而不是谎报 0。</li>
+ *   <li><b>上游切换检测</b>：中转站常把请求轮询到不同上游，
+ *       这会让前缀缓存彻底失效（每次都是新上游的冷缓存）。
+ *       这里从响应头提取上游标识并粘进结果，供 {@link UpstreamTracker} 检测。
+ *       这是「命中率为什么上不去」最难查的一种原因。</li>
+ *   <li><b>usage 原文保留</b>：最近一次请求的 usage 原文会被存下来，
+ *       供 {@code /aibot cache probe} 展示，用户能自己看清字段名。</li>
+ *   <li><b>max_tokens 缺省不发送</b>：部分中转站对 max_tokens 处理不规范，
+ *       设为 0 或负数时改为不发送该字段，让它用上游默认值。</li>
+ * </ol>
  *
- * <p>线程模型：所有 HTTP 调用都在独立的守护线程池里执行，
- * 回调 {@link ResponseHandler} 的实现方需自行切回主线程（由调用方负责）。</p>
+ * <p>线程模型不变：所有 HTTP 调用在独立守护线程池里执行，
+ * 回调方负责切回主线程。</p>
  */
 public final class LLMClient {
 
@@ -42,41 +48,35 @@ public final class LLMClient {
 
     private final AIConfig config;
     private final CacheStats stats;
+    private final UpstreamTracker upstreamTracker;
 
-    /** JDK 内置异步 HTTP 客户端。连接池与线程池由 JDK 管理。 */
     private final HttpClient httpClient;
-
-    /** 执行 CompletableFuture 回调的线程池（守护线程，不阻止 JVM 退出）。 */
     private final ExecutorService executor;
 
-    /** 上次请求发起的时间戳（毫秒），用于限流。 */
     private final AtomicLong lastRequestAt = new AtomicLong(0L);
-
-    /** 用于给日志编号，便于排查单次请求。 */
     private final AtomicLong requestSeq = new AtomicLong(0L);
 
-    /**
-     * 异步响应回调。
-     */
+    /** 最近一次请求的 usage 原文（诊断用）。 */
+    private volatile String lastUsageRaw = "";
+    /** 最近一次请求的完整响应体片段（诊断用，可能含错误信息）。 */
+    private volatile String lastResponseSnippet = "";
+    /** 最近一次请求的时间戳与步号，用于诊断展示。 */
+    private volatile long lastRequestAtMillis = 0L;
+
     public interface ResponseHandler {
-        /**
-         * 请求成功并解析出模型文本内容。
-         *
-         * @param content 模型返回的文本（期望是 JSON 动作字符串）
-         */
         void onSuccess(String content);
 
-        /**
-         * 请求失败（网络、超时、HTTP 错误、解析失败等）。
-         *
-         * @param error 错误描述
-         */
         void onFailure(String error);
     }
 
     public LLMClient(AIConfig config, CacheStats stats) {
+        this(config, stats, new UpstreamTracker());
+    }
+
+    public LLMClient(AIConfig config, CacheStats stats, UpstreamTracker upstreamTracker) {
         this.config = config;
         this.stats = stats;
+        this.upstreamTracker = upstreamTracker;
         this.executor = Executors.newFixedThreadPool(2, r -> {
             Thread t = new Thread(r, "aibot-llm-worker");
             t.setDaemon(true);
@@ -84,20 +84,20 @@ public final class LLMClient {
         });
         this.httpClient = HttpClient.newBuilder()
                 .executor(this.executor)
-                .connectTimeout(Duration.ofSeconds(10))
+                .connectTimeout(Duration.ofSeconds(config.connectTimeoutSeconds))
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
+        // 单价随配置走：中转站的计费与官方差异极大，不能写死
+        this.stats.setPrices(config.pricePerMillionInputMiss,
+                config.pricePerMillionInputHit, config.pricePerMillionOutput);
     }
 
     /**
      * 异步发送一次对话请求。
      *
      * <p><b>缓存关键点</b>：messages 数组的第 0 条永远是固定不变的 system message，
-     * 第 1 条是固定不变的静态前缀 user message，动态内容追加在最后。
+     * 接下来是固定不变的静态前缀 user message，动态内容追加在最后。
      * 这样服务端的 KV Cache 才能命中前缀。</p>
-     *
-     * @param prompt    由 {@link PromptBuilder} 构建好的请求体 messages
-     * @param handler   响应回调
      */
     public void requestAsync(PromptBuilder.BuiltPrompt prompt, ResponseHandler handler) {
         long seq = this.requestSeq.incrementAndGet();
@@ -107,7 +107,7 @@ public final class LLMClient {
             return;
         }
 
-        // 限流：确保两次请求间隔不小于配置值
+        // 限流：确保两次请求间隔不小于配置值（中转站通常有更严格的 QPS 限制）
         long now = System.currentTimeMillis();
         long last = lastRequestAt.get();
         long waitMs = config.minRequestIntervalMs - (now - last);
@@ -119,10 +119,10 @@ public final class LLMClient {
             }
         }
         lastRequestAt.set(System.currentTimeMillis());
+        lastRequestAtMillis = System.currentTimeMillis();
 
         String body = buildRequestBody(prompt);
         String url = config.resolveChatCompletionsUrl();
-
         LOGGER.fine("[AIBot] #" + seq + " 发起请求 -> " + url + " model=" + config.model);
         sendWithRetry(url, body, seq, 0, handler);
     }
@@ -130,41 +130,40 @@ public final class LLMClient {
     /**
      * 构造请求体 JSON 字符串。
      *
-     * <p>messages 顺序固定为：</p>
      * <pre>
      *   [0] system  —— 静态系统提示词（永不变化）
-     *   [1] user    —— 静态动作前缀（永不变化）
-     *   [2] user    —— 动态上下文（状态 + 记忆 + 目标，每次变化）
+     *   [1] user    —— 静态前缀（永不变化，体量大，缓存收益主体）
+     *   [2] user    —— 慢变层动态（身份/能力/长期经验，变化频率低）
+     *   [3] user    —— 快变层动态（状态/计划/反馈，每轮变化）
      * </pre>
+     *
+     * <p><b>为什么要拆成两条动态消息</b>：服务端的前缀缓存是从第一处不一致往后
+     * 全部失效。把「几乎不变的长期经验」和「每轮都变的状态」混在一条里，
+     * 会导致每次请求都在同一条消息内部出现差异，缓存块边界被切在最前面，
+     * 后面所有内容都要重算。拆开之后，慢变层可以独立命中缓存。</p>
      */
     private String buildRequestBody(PromptBuilder.BuiltPrompt prompt) {
         JsonObject root = new JsonObject();
         root.addProperty("model", config.model);
-        root.addProperty("temperature", config.temperature);
-        root.addProperty("max_tokens", config.maxTokens);
-        // 部分兼容服务需要 stream=false 才返回 usage；显式声明更稳
+        if (config.temperature >= 0) {
+            root.addProperty("temperature", config.temperature);
+        }
+        // maxTokens<=0 表示「不发送」，让上游用它自己的默认值。
+        // 部分中转站对 max_tokens 处理不规范（例如限制了也不报错，直接截断输出）。
+        if (config.maxTokens > 0) {
+            root.addProperty("max_tokens", config.maxTokens);
+        }
         root.addProperty("stream", false);
 
         JsonArray messages = new JsonArray();
-
-        JsonObject sys = new JsonObject();
-        sys.addProperty("role", "system");
-        sys.addProperty("content", prompt.systemMessage());
-        messages.add(sys);
-
-        JsonObject staticUser = new JsonObject();
-        staticUser.addProperty("role", "user");
-        staticUser.addProperty("content", prompt.staticUserMessage());
-        messages.add(staticUser);
-
-        JsonObject dynamicUser = new JsonObject();
-        dynamicUser.addProperty("role", "user");
-        dynamicUser.addProperty("content", prompt.dynamicUserMessage());
-        messages.add(dynamicUser);
-
+        addMessage(messages, "system", prompt.systemMessage());
+        addMessage(messages, "user", prompt.staticUserMessage());
+        if (prompt.slowUserMessage() != null && !prompt.slowUserMessage().isEmpty()) {
+            addMessage(messages, "user", prompt.slowUserMessage());
+        }
+        addMessage(messages, "user", prompt.dynamicUserMessage());
         root.add("messages", messages);
 
-        // 让部分服务返回 usage 统计（OpenAI 兼容服务通常默认返回）
         JsonObject streamOptions = new JsonObject();
         streamOptions.addProperty("include_usage", true);
         root.add("stream_options", streamOptions);
@@ -172,23 +171,36 @@ public final class LLMClient {
         return GSON.toJson(root);
     }
 
-    /**
-     * 带重试的实际发送逻辑。
-     *
-     * <p>重试策略：网络异常 / 超时 / 429 / 5xx 重试并指数退避；
-     * 4xx（除 429）属于请求本身有问题，重试无意义，直接失败。</p>
-     */
+    private static void addMessage(JsonArray arr, String role, String content) {
+        JsonObject m = new JsonObject();
+        m.addProperty("role", role);
+        m.addProperty("content", content == null ? "" : content);
+        arr.add(m);
+    }
+
     private void sendWithRetry(String url, String body, long seq, int attempt, ResponseHandler handler) {
         HttpRequest request;
         try {
-            request = HttpRequest.newBuilder()
+            HttpRequest.Builder b = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofMillis(config.requestTimeoutMs))
                     .header("Content-Type", "application/json; charset=utf-8")
                     .header("Authorization", "Bearer " + config.apiKey.trim())
-                    .header("Accept", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                    .build();
+                    .header("Accept", "application/json");
+            // 自定义头：部分中转站要求额外的鉴权/路由头
+            if (config.extraHeaders != null && !config.extraHeaders.trim().isEmpty()) {
+                for (String line : config.extraHeaders.split("\n")) {
+                    int i = line.indexOf(':');
+                    if (i > 0) {
+                        String k = line.substring(0, i).trim();
+                        String v = line.substring(i + 1).trim();
+                        if (!k.isEmpty() && !v.isEmpty()) {
+                            b.header(k, v);
+                        }
+                    }
+                }
+            }
+            request = b.POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build();
         } catch (IllegalArgumentException e) {
             handler.onFailure("baseUrl 非法: " + url + " —— " + e.getMessage());
             return;
@@ -197,7 +209,6 @@ public final class LLMClient {
         httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
                 .whenComplete((resp, throwable) -> {
                     if (throwable != null) {
-                        // 网络层错误：可重试
                         handleRetryOrFail(url, body, seq, attempt, handler,
                                 "网络错误: " + rootCauseMessage(throwable), true);
                         return;
@@ -205,32 +216,26 @@ public final class LLMClient {
 
                     int code = resp.statusCode();
                     if (code >= 200 && code < 300) {
-                        handleSuccessBody(resp.body(), seq, handler);
+                        handleSuccessBody(resp, seq, handler);
                     } else if (code == 429 || code >= 500) {
-                        // 限流或服务端错误：可重试
                         handleRetryOrFail(url, body, seq, attempt, handler,
                                 "HTTP " + code + ": " + truncate(resp.body(), 300), true);
                     } else {
-                        // 4xx：请求本身有问题，重试无意义
                         stats.recordFailure();
-                        LOGGER.warning("[AIBot] #" + seq + " 请求失败 HTTP " + code + ": " + truncate(resp.body(), 500));
+                        lastResponseSnippet = truncate(resp.body(), 800);
+                        LOGGER.warning("[AIBot] #" + seq + " 请求失败 HTTP " + code + ": "
+                                + truncate(resp.body(), 500));
                         handler.onFailure("HTTP " + code + " —— " + extractErrorMessage(resp.body()));
                     }
                 });
     }
 
-    /**
-     * 判断是否继续重试。
-     *
-     * @param retryable 该错误是否可重试
-     */
     private void handleRetryOrFail(String url, String body, long seq, int attempt,
                                    ResponseHandler handler, String error, boolean retryable) {
         if (retryable && attempt < config.maxRetries) {
-            long backoffMs = 500L * (1L << attempt); // 500ms, 1s, 2s ...
+            long backoffMs = 500L * (1L << attempt);
             LOGGER.info("[AIBot] #" + seq + " " + error + "；" + backoffMs + "ms 后重试（第 "
                     + (attempt + 1) + "/" + config.maxRetries + " 次）");
-            // 用单独的线程做延迟，避免阻塞 worker
             final int nextAttempt = attempt + 1;
             CompletableFuture.delayedExecutor(backoffMs, java.util.concurrent.TimeUnit.MILLISECONDS, executor)
                     .execute(() -> sendWithRetry(url, body, seq, nextAttempt, handler));
@@ -242,18 +247,23 @@ public final class LLMClient {
     }
 
     /**
-     * 处理 HTTP 2xx 响应体，解析出内容与 usage 缓存字段。
+     * 处理 HTTP 2xx 响应体：解析内容与用量，并把上游标识喂给追踪器。
      */
-    private void handleSuccessBody(String body, long seq, ResponseHandler handler) {
+    private void handleSuccessBody(HttpResponse<String> resp, long seq, ResponseHandler handler) {
+        String body = resp.body();
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
 
-            // 解析 choices[0].message.content
+            // ---- 内容 ----
             String content = null;
+            String finishReason = "";
             if (root.has("choices") && root.get("choices").isJsonArray()) {
                 JsonArray choices = root.getAsJsonArray("choices");
                 if (choices.size() > 0) {
                     JsonObject choice = choices.get(0).getAsJsonObject();
+                    if (choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()) {
+                        finishReason = choice.get("finish_reason").getAsString();
+                    }
                     if (choice.has("message") && choice.get("message").isJsonObject()) {
                         JsonObject msg = choice.getAsJsonObject("message");
                         if (msg.has("content") && !msg.get("content").isJsonNull()) {
@@ -263,60 +273,76 @@ public final class LLMClient {
                 }
             }
 
-            // 解析 usage（含缓存字段），这是缓存命中率的数据来源
-            long prompt = 0, completion = 0, cached = 0, miss = 0;
+            // ---- 用量（含缓存字段，多方言） ----
+            JsonObject usageObj = null;
             if (root.has("usage") && root.get("usage").isJsonObject()) {
-                JsonObject usage = root.getAsJsonObject("usage");
-                prompt = getLong(usage, "prompt_tokens", 0);
-                completion = getLong(usage, "completion_tokens", 0);
-
-                // DeepSeek 风格：prompt_cache_hit_tokens / prompt_cache_miss_tokens
-                long deepseekHit = getLong(usage, "prompt_cache_hit_tokens", -1);
-                long deepseekMiss = getLong(usage, "prompt_cache_miss_tokens", -1);
-
-                // OpenAI 风格：prompt_tokens_details.cached_tokens
-                long openaiHit = -1;
-                if (usage.has("prompt_tokens_details") && usage.get("prompt_tokens_details").isJsonObject()) {
-                    openaiHit = getLong(usage.getAsJsonObject("prompt_tokens_details"), "cached_tokens", -1);
-                }
-                // 部分服务直接把 cached_tokens 放在 usage 顶层
-                if (openaiHit < 0) {
-                    openaiHit = getLong(usage, "cached_tokens", -1);
-                }
-
-                if (deepseekHit >= 0) {
-                    cached = deepseekHit;
-                    miss = deepseekMiss >= 0 ? deepseekMiss : Math.max(0, prompt - cached);
-                } else if (openaiHit >= 0) {
-                    cached = openaiHit;
-                    miss = Math.max(0, prompt - cached);
-                } else {
-                    // 服务未返回缓存字段：全部计入未命中，避免虚高命中率
-                    cached = 0;
-                    miss = prompt;
-                }
+                usageObj = root.getAsJsonObject("usage");
+                lastUsageRaw = truncate(GSON.toJson(usageObj), 1200);
             }
+            long completionTokens = 0;
+            if (usageObj != null) {
+                completionTokens = longOf(usageObj, "completion_tokens",
+                        longOf(usageObj, "output_tokens", 0));
+            }
+            CacheUsageParser.Result u = CacheUsageParser.parse(usageObj, completionTokens);
+            stats.recordSuccess(u);
 
-            stats.recordSuccess(prompt, completion, cached, miss);
+            // ---- 上游追踪：中转站轮询会导致缓存永远冷启动 ----
+            String upstream = detectUpstream(resp);
+            upstreamTracker.record(upstream, u.cacheReported, u.cachedTokens, u.missTokens);
 
             if (content == null || content.trim().isEmpty()) {
-                handler.onFailure("模型返回了空内容");
+                handler.onFailure("模型返回了空内容"
+                        + (finishReason.isEmpty() ? "" : "（finish_reason=" + finishReason + "）"));
                 return;
             }
 
-            LOGGER.fine("[AIBot] #" + seq + " 成功: prompt=" + prompt + " completion=" + completion
-                    + " cached=" + cached + " miss=" + miss);
+            // 输出被 max_tokens 截断时给出明确提示，否则用户会以为是模型笨
+            if ("length".equals(finishReason)) {
+                LOGGER.warning("[AIBot] 输出被 max_tokens 截断，建议调大：/aibot config set maxTokens 2048");
+            }
+
+            LOGGER.fine("[AIBot] #" + seq + " 成功: " + u);
             handler.onSuccess(content);
 
         } catch (Exception e) {
             stats.recordFailure();
+            lastResponseSnippet = truncate(body, 800);
             LOGGER.log(Level.WARNING, "[AIBot] #" + seq + " 解析响应失败", e);
             handler.onFailure("解析响应失败: " + e.getMessage() + " —— 原始内容: " + truncate(body, 300));
         }
     }
 
-    /** 从错误响应体里提取可读的错误信息。 */
-    private String extractErrorMessage(String body) {
+    /**
+     * 从响应里识别上游来源。
+     *
+     * <p>中转站通常会在响应头里留下痕迹（自己的名字、或上游的 server 头）。
+     * 识别它不是为了好看，而是为了检测「同一会话被轮询到不同上游」——
+     * 这会让前缀缓存完全失效，是命中率上不去的最隐蔽原因。</p>
+     */
+    private String detectUpstream(HttpResponse<String> resp) {
+        try {
+            // 优先看自定义的上游标识头（很多中转站会写）
+            for (String h : new String[]{
+                    "x-upstream", "x-upstream-name", "x-provider", "x-model-provider",
+                    "x-cache", "cf-cache-status", "x-served-by", "server"}) {
+                var v = resp.headers().firstValue(h);
+                if (v.isPresent() && !v.get().isBlank()) {
+                    return h + "=" + v.get();
+                }
+            }
+            // 退而求其次：用 cf-ray 这类唯一 ID 的前缀当指纹
+            var ray = resp.headers().firstValue("cf-ray");
+            if (ray.isPresent() && ray.get().length() > 3) {
+                String r = ray.get();
+                return "cf-ray-prefix=" + r.substring(Math.max(0, r.length() - 6));
+            }
+        } catch (Throwable ignored) {
+        }
+        return "(无标识)";
+    }
+
+    private static String extractErrorMessage(String body) {
         try {
             JsonObject root = JsonParser.parseString(body).getAsJsonObject();
             if (root.has("error")) {
@@ -330,12 +356,11 @@ public final class LLMClient {
                 return root.get("message").getAsString();
             }
         } catch (Exception ignored) {
-            // 响应体不是 JSON，直接返回原文
         }
         return truncate(body, 300);
     }
 
-    private static long getLong(JsonObject obj, String key, long def) {
+    private static long longOf(JsonObject obj, String key, long def) {
         try {
             if (obj.has(key) && !obj.get(key).isJsonNull()) {
                 return obj.get(key).getAsLong();
@@ -361,7 +386,26 @@ public final class LLMClient {
         return s.length() <= max ? s : s.substring(0, max) + "...(截断)";
     }
 
-    /** 客户端关闭（服务器停止时调用）。 */
+    // ---- 诊断访问器（供 /aibot cache probe） ----
+
+    /** 最近一次请求的 usage 原文（原始 JSON）。 */
+    public String lastUsageRaw() {
+        return lastUsageRaw;
+    }
+
+    /** 最近一次失败响应的片段。 */
+    public String lastResponseSnippet() {
+        return lastResponseSnippet;
+    }
+
+    public long lastRequestAtMillis() {
+        return lastRequestAtMillis;
+    }
+
+    public UpstreamTracker upstreamTracker() {
+        return upstreamTracker;
+    }
+
     public void shutdown() {
         executor.shutdownNow();
     }

@@ -1,0 +1,215 @@
+# version-matrix.yml
+#
+# AIBot 全版本覆盖矩阵。
+#
+# 说明：Minecraft 的 API 在版本间反复大改，无法用一份源码编译所有版本。
+# 因此按「API 断代」划分，每个断代一个源码目录，用 fabric.mod.json 的
+# depends.minecraft 声明它覆盖的版本区间。
+#
+# 命名规则：fab-<断代代表版本>，代表版本选取该断代内 API 最完整的一个。
+#
+# 字段：
+#   id          目录名
+#   minecraft   编译用的 MC 版本（该断代的代表版本）
+#   covers      该 jar 实际兼容的 MC 版本区间（写进 fabric.mod.json）
+#   java        编译目标 Java 版本
+#   loader      Fabric Loader 版本
+#   fabricApi   编译用的 fabric-api 版本
+#   loom        Loom 版本
+#   note        该断代的关键 API 特征（写代码时要对齐的点）
+#   status      ready | pending | unsupported
+
+generations:
+
+  # ============ 1.14 ~ 1.14.4 ============
+  - id: fab-1.14.4
+    minecraft: "1.14.4"
+    covers: ">=1.14 <1.15"
+    java: 8
+    loader: "0.14.24"
+    fabricApi: "0.28.5+1.14"
+    loom: "0.2.7"
+    gradle: "6.9.4"
+    note: >
+      Yarn 命名时代。Entity/PlayerEntity/ServerPlayerEntity 皆带 Entity 后缀。
+      无 Registry 静态访问，需用 Registry.BLOCK.get(Identifier)。
+    status: pending
+
+  # ============ 1.15 ~ 1.15.2 ============
+  - id: fab-1.15.2
+    minecraft: "1.15.2"
+    covers: ">=1.15 <1.16"
+    java: 8
+    loader: "0.14.24"
+    fabricApi: "0.28.5+1.15"
+    loom: "0.2.7"
+    gradle: "6.9.4"
+    note: "与 1.14 断代基本一致，主要差异在方块/实体接口微调。"
+    status: pending
+
+  # ============ 1.16 ~ 1.16.5 ============
+  - id: fab-1.16.5
+    minecraft: "1.16.5"
+    covers: ">=1.16 <1.16.5"
+    java: 8
+    loader: "0.14.24"
+    fabricApi: "0.42.0+1.16"
+    loom: "0.10.6"
+    gradle: "7.4.2"
+    note: >
+      Registry 仍在重构。Identifier 构造仍为 new Identifier(ns, path)。
+      命令注册仍是 CommandRegistrationCallback 早期版本。
+    status: pending
+
+  # ============ 1.17 ~ 1.18.1 ============
+  - id: fab-1.18.1
+    minecraft: "1.18.1"
+    covers: ">=1.17 <1.18.2"
+    java: 17
+    loader: "0.14.24"
+    fabricApi: "0.46.6+1.18"
+    loom: "0.12.12"
+    gradle: "7.6"
+    note: >
+      Java 17 基线。ServerPlayerEntity 仍需 Entity 后缀。
+      CommandRegistrationCallback 变为 v2。
+    status: pending
+
+  # ============ 1.18.2 ~ 1.19.2 ============
+  - id: fab-1.19.2
+    minecraft: "1.19.2"
+    covers: ">=1.18.2 <1.19.3"
+    java: 17
+    loader: "0.14.24"
+    fabricApi: "0.77.0+1.19.2"
+    loom: "1.0.34"
+    gradle: "7.6"
+    note: >
+      ServerPlayNetworking 签名变化。聊天事件用 ServerMessageEvents.CHAT_MESSAGE。
+      仍需 ServerPlayerEntity。
+    status: pending
+
+  # ============ 1.19.3 ~ 1.19.4 ============
+  - id: fab-1.19.4
+    minecraft: "1.19.4"
+    covers: ">=1.19.3 <1.20"
+    java: 17
+    loader: "0.14.24"
+    fabricApi: "0.87.2+1.19.4"
+    loom: "1.1.25"
+    gradle: "7.6.4"
+    note: >
+      关键断代：Entity 后缀大剥离（ServerPlayerEntity -> ServerPlayer）。
+      命令 API 改用 CommandSourceStack。
+    status: pending
+
+  # ============ 1.20 ~ 1.20.1 (已是现成的) ============
+  - id: fab-1.20.1
+    minecraft: "1.20.1"
+    covers: ">=1.20 <1.20.2"
+    java: 17
+    loader: "0.19.3"
+    fabricApi: "0.92.12+1.20.1"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: "现有版本线，本项目已实现。"
+    status: ready
+
+  # ============ 1.20.2 ~ 1.20.6 ============
+  - id: fab-1.20.6
+    minecraft: "1.20.6"
+    covers: ">=1.20.2 <1.21"
+    java: 21
+    loader: "0.19.3"
+    fabricApi: "0.100.8+1.20.6"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: >
+      关键断代：组件化（Component / ItemStack 的 Data Components）、
+      CustomPacketPayload 引入、Registry 用 BuiltInRegistries。
+      Java 21 基线。
+    status: pending
+
+  # ============ 1.21 ~ 1.21.1 (已是现成的) ============
+  - id: fab-1.21.1
+    minecraft: "1.21.1"
+    covers: ">=1.21 <1.21.2"
+    java: 21
+    loader: "0.19.3"
+    fabricApi: "0.116.17+1.21.1"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: "现有版本线，本项目已实现并完成本版改造。"
+    status: ready
+
+  # ============ 1.21.2 ~ 1.21.4 ============
+  - id: fab-1.21.4
+    minecraft: "1.21.4"
+    covers: ">=1.21.2 <1.21.5"
+    java: 21
+    loader: "0.19.3"
+    fabricApi: "0.119.4+1.21.4"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: "移动/输入 API 调整。"
+    status: pending
+
+  # ============ 1.21.5 ~ 1.21.8 ============
+  - id: fab-1.21.8
+    minecraft: "1.21.8"
+    covers: ">=1.21.5 <1.21.9"
+    java: 21
+    loader: "0.19.3"
+    fabricApi: "0.136.1+1.21.8"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: "输入与实体接口继续调整。"
+    status: pending
+
+  # ============ 1.21.9 ~ 1.21.11 (1.21.11 已是现成的) ============
+  - id: fab-1.21.11
+    minecraft: "1.21.11"
+    covers: ">=1.21.9 <26.1"
+    java: 21
+    loader: "0.19.3"
+    fabricApi: "0.141.6+1.21.11"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: "现有版本线，本项目已实现。"
+    status: ready
+
+  # ============ 26.1 ~ 26.1.2 ============
+  - id: fab-26.1.2
+    minecraft: "26.1.2"
+    covers: ">=26.1 <26.2"
+    java: 21
+    loader: "0.19.3"
+    fabricApi: "0.155.3+26.1.2"
+    loom: "1.17.19"
+    gradle: "9.5.1"
+    note: "新版本号体系起点。"
+    status: pending
+
+  # ============ 26.2 ============
+  - id: fab-26.2
+    minecraft: "26.2"
+    covers: ">=26.2 <26.3"
+    java: 25
+    loader: "0.19.5"
+    fabricApi: "0.161.0+26.2"
+    loom: "1.17.21"
+    gradle: "9.5.1"
+    note: "Java 25 基线。"
+    status: pending
+
+  # ============ 26.3 (已是现成的) ============
+  - id: fab-26.3
+    minecraft: "26.3"
+    covers: ">=26.3 <26.4"
+    java: 25
+    loader: "0.19.5"
+    fabricApi: "0.161.0+26.3"
+    loom: "1.17.21"
+    gradle: "9.5.1"
+    note: "现有版本线，本项目已实现。"
+    status: ready
