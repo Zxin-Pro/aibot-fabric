@@ -109,7 +109,7 @@ public final class StateCollector {
         sb.append("\"saturation\":").append(fmt(bot.getFoodData().getSaturationLevel())).append(',');
         sb.append("\"on_ground\":").append(bot.onGround()).append(',');
         sb.append("\"alive\":").append(bot.isAlive()).append(',');
-        sb.append("\"dimension\":").append(jsonString(bot.serverLevel().dimension().location().toString()));
+        sb.append("\"dimension\":").append(jsonString(bot.level().dimension().identifier().toString()));
         sb.append('}');
     }
 
@@ -141,7 +141,7 @@ public final class StateCollector {
      */
     private static void appendNearbyBlocks(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"nearby_blocks\":[");
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         BlockPos center = bot.blockPosition();
 
         // 用 List 收集再排序，避免 HashMap 顺序抖动
@@ -202,7 +202,7 @@ public final class StateCollector {
     /** 附近实体：按距离升序，同距离按类型 ID 排序。 */
     private static void appendNearbyEntities(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"nearby_entities\":[");
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         AABB box = bot.getBoundingBox().inflate(ENTITY_SCAN_RADIUS);
         // 注意：AABB 版本的 getEntities 定义在 Level 上（不是 ServerLevel），
         // 1.21.x 里 ServerLevel 只保留了 EntityTypeTest 版本的重载。
@@ -248,7 +248,7 @@ public final class StateCollector {
     /** 附近玩家：按距离升序。 */
     private static void appendNearbyPlayers(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
         sb.append("\"nearby_players\":[");
-        List<ServerPlayer> players = bot.serverLevel().players();
+        List<ServerPlayer> players = bot.level().players();
         List<PlayerInfo> infos = new ArrayList<>();
         for (ServerPlayer p : players) {
             if (p.getUUID().equals(bot.getUUID())) {
@@ -277,7 +277,7 @@ public final class StateCollector {
 
     /** 环境：时间、天气、光照。 */
     private static void appendEnvironment(StringBuilder sb, net.minecraft.server.level.ServerPlayer bot) {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = bot.level();
         long dayTime = level.getDayTime() % 24000L;
         sb.append("\"environment\":{");
         sb.append("\"day_time\":").append(dayTime).append(',');

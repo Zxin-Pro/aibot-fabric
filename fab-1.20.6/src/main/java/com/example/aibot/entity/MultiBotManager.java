@@ -282,10 +282,8 @@ public final class MultiBotManager {
             return null;
         }
         try {
-            ServerPlayer fresh = server.getPlayerList().respawn(
-                    old,
-                    true,
-                    net.minecraft.world.entity.Entity.RemovalReason.KILLED);
+            // 1.20.6 的 respawn 是 2 参数（1.21.11 才加了 RemovalReason）
+            ServerPlayer fresh = server.getPlayerList().respawn(old, true);
             if (fresh == null) {
                 LOGGER.warning("[AIBot] " + name + " 重生失败：respawn 返回 null");
                 return null;

@@ -193,8 +193,9 @@ public final class PathFinder {
                 int nz = current.z + move.dz();
 
                 // 边界保护
-                // 1.20.1 / 1.21.1 的 LevelHeightAccessor 用 getMinBuildHeight/getMaxBuildHeight
-                if (ny < level.getMinBuildHeight() || ny > level.getMaxBuildHeight()) {
+                // 1.21.11+ 的 LevelHeightAccessor 用 getMinY/getMaxY
+                net.minecraft.world.level.LevelHeightAccessor heights = level;
+                if (ny < heights.getMinY() || ny > heights.getMaxY()) {
                     continue;
                 }
 
@@ -449,7 +450,7 @@ public final class PathFinder {
                 return false;
             }
             BlockState s = level.getBlockState(p);
-            if (!s.isAir() && s.getFluidState().isEmpty() && s.isSolidRender(level, p)) {
+            if (!s.isAir() && !s.getFluidState().isEmpty() == false && s.isSolidRender()) {
                 return false;
             }
         }
@@ -515,7 +516,7 @@ public final class PathFinder {
                 return false;
             }
             BlockState s = level.getBlockState(p);
-            if (!s.isAir() && s.isSolidRender(level, p)) {
+            if (!s.isAir() && s.isSolidRender()) {
                 return false;
             }
         }

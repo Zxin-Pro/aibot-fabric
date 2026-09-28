@@ -20,7 +20,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 多智能体管理器：同时运行任意数量的 AIBot（Minecraft 1.21.11 实现）。
+ * 多智能体管理器：同时运行任意数量的 AIBot（Minecraft 1.21.11 版本线）。
  *
  * <p><b>设计要点（这也是「和真人没区别」的关键）</b>：每个智能体都是一个
  * 独立的 {@link ServerPlayer} 实体，拥有：</p>
@@ -38,15 +38,14 @@ import java.util.logging.Logger;
  *
  * <p>用 {@link LinkedHashMap} 保存，保证 tick 顺序与列表输出顺序稳定。</p>
  *
- * <p><b>1.20.1 ↔ 1.21.11 版本差异（务必对照其他模块）</b>：</p>
+ * <p><b>1.21.11 版本差异</b>（与 1.20.1 对照）：</p>
  * <ul>
- *   <li>{@code placeNewPlayer} 在 1.21.11 是
- *       {@code (Connection, ServerPlayer, CommonListenerCookie)} <b>3 参数</b>，
- *       比 1.20.1 多一个 CommonListenerCookie；cookie 必须与构造
- *       {@code ServerGamePacketListenerImpl} 时用的是同一个对象。</li>
- *   <li>{@code PlayerList.respawn} 在 1.21.11 是
- *       {@code (ServerPlayer, boolean, Entity.RemovalReason)} <b>3 参数</b>，
- *       1.20.1 只有 2 参数（1.21.11 多出的 RemovalReason 必须传 KILLED）。</li>
+ *   <li>{@code placeNewPlayer} 是 <b>3 参数</b>，多了一个
+ *       {@code CommonListenerCookie}，必须传 {@link AIBotPlayer#createCookie()}。</li>
+ *   <li>{@code respawn} 是 <b>3 参数</b>，需要显式的
+ *       {@code Entity.RemovalReason}。</li>
+ *   <li>世界重生点要用 {@code ServerLevel.getRespawnData().pos()}，
+ *       而 1.20.1 是 {@code getSharedSpawnPos()}。</li>
  * </ul>
  */
 public final class MultiBotManager {
@@ -65,7 +64,7 @@ public final class MultiBotManager {
         public final ShortTermMemory shortTermMemory = new ShortTermMemory();
         public final LongTermMemory longTermMemory;
         public final LandmarkMemory landmarkMemory;
-        /** 本智能体听到的聊天（玩家发言）。每个 bot 一份，互不干扰。 */
+        /** 聊天记忆：本智能体「听到」的玩家发言（每个 bot 独立）。 */
         public final com.example.aibot.memory.ChatMemory chatMemory = new com.example.aibot.memory.ChatMemory();
 
         Agent(BotProfile profile, LongTermMemory ltm, LandmarkMemory lm, AutoLoop loop) {
@@ -144,13 +143,12 @@ public final class MultiBotManager {
 
         try {
             ServerLevel overworld = server.overworld();
-            // 版本差异点：AIBotPlayer 在 1.21.11 内部会自己建 CommonListenerCookie，
-            // 因此 spawn 这里不需要额外传参（1.20.1 亦然，签名保持一致）。
             AIBotPlayer bot = new AIBotPlayer(server, overworld, name, profile.resolvedSkinOwner());
 
-            // 生成位置：自定义坐标优先，否则用世界重生点
+            // 生成位置：自定义坐标优先，否则用世界重生点。
+            // 1.21.11 用 getRespawnData().pos()，旧版本是 getSharedSpawnPos()。
             if (profile.spawnAtWorldSpawn) {
-                var spawnPos = overworld.getSharedSpawnPos();
+                var spawnPos = overworld.getRespawnData().pos();
                 bot.setPos(spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5);
             } else {
                 bot.setPos(profile.spawnX, profile.spawnY, profile.spawnZ);
@@ -160,9 +158,8 @@ public final class MultiBotManager {
 
             // 注册进玩家列表 —— 这一步才让它真正「入服」：
             // 有 TAB 条目、能被渲染、能收发聊天、能被其他玩家看见。
-            //
-            // 【版本差异】1.21.11 的 placeNewPlayer 必须带上与构造连接时
-            // 同一个 CommonListenerCookie，否则客户端会收到不一致的登录信息。
+            // 注意参数类型：第一个参数要原始 Connection（不是 connection 字段，
+            // 那个是 ServerGamePacketListenerImpl），第三个是登录 cookie。
             server.getPlayerList().placeNewPlayer(
                     bot.getNetworkConnection(), bot, bot.createCookie());
 
@@ -266,9 +263,8 @@ public final class MultiBotManager {
      * 否则后续所有操作都会打在已死亡的旧对象上。</p>
      *
      * <p><b>1.21.11 版本差异</b>：{@code respawn} 是 3 参数，
-     * 比 1.20.1 多一个 {@code Entity.RemovalReason}。这里必须传
-     * {@code KILLED}：它决定旧实体的移除方式（KILLED 才会正确触发
-     * 死亡掉落与统计，传 CHANGED_DIMENSION 之类的值会留下幽灵实体）。</p>
+     * 第一个是待重生的玩家（保留库存），第二个是「是否保持原维度」，
+     * 第三个是实体的移除原因，必须显式给出。</p>
      *
      * @return 重生后的玩家；失败返回 null
      */
@@ -284,7 +280,7 @@ public final class MultiBotManager {
         try {
             ServerPlayer fresh = server.getPlayerList().respawn(
                     old,
-                    true,
+                    true, // keepInventory: 保留物品栏，避免辛苦攒的资源一死全丢
                     net.minecraft.world.entity.Entity.RemovalReason.KILLED);
             if (fresh == null) {
                 LOGGER.warning("[AIBot] " + name + " 重生失败：respawn 返回 null");
@@ -381,7 +377,7 @@ public final class MultiBotManager {
     }
 
     /**
-     * 让所有智能体「听到」一条聊天。
+     * 把一条玩家发言喂给所有智能体（除说话者自己）。
      *
      * <p>真人在自己附近说话是能听见的。这里不做距离衰减 ——
      * 原版聊天本来就是全服可见的，距离衰减反而不像玩家。</p>
