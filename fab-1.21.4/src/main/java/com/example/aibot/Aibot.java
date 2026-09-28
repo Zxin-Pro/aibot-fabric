@@ -34,9 +34,9 @@ import java.nio.file.Path;
  * 所有智能体复用同一份静态前缀，因此能命中同一份服务端 KV 缓存，
  * 边际成本远低于让每个 bot 各建一个客户端。</p>
  *
- * <p><b>注意</b>：本类只实现 {@link ModInitializer}。假玩家是纯服务端概念，
- * 客户端不需要任何逻辑，因此刻意<b>不</b>实现 ClientModInitializer，
- * 避免客户端专用类被服务端加载导致 ClassNotFound。</p>
+ * <p><b>注意</b>：本类只实现 {@link ModInitializer}（双端入口，但逻辑仅在服务端生效）。
+ * 假玩家是纯服务端概念，客户端不需要任何逻辑。因此这里刻意<b>不</b>实现
+ * ClientModInitializer，避免客户端专用类被服务端加载导致 ClassNotFound。</p>
  */
 public class Aibot implements ModInitializer {
 
@@ -119,11 +119,7 @@ public class Aibot implements ModInitializer {
             }
         });
 
-        // 4. 让智能体能「听见」聊天。
-        //
-        // 之前的版本里智能体只能说、不能听，玩家跟它讲话它毫无反应 ——
-        // 这是最不像真人的地方。这里监听所有聊天消息，转给每个智能体，
-        // 由它们自行决定是否回应。
+        // 4. 聊天监听：让智能体「听得见」玩家说话
         registerChatListener();
 
         // 5. 静态前缀自检：确保没有动态内容污染缓存前缀
@@ -131,7 +127,6 @@ public class Aibot implements ModInitializer {
         if (warning != null) {
             LOGGER.warn("[AIBot] 提示词静态前缀自检警告: {}", warning);
         }
-        // 打印指纹，便于确认前缀未被改动（改动会降低缓存命中率）
         LOGGER.info("[AIBot] 提示词静态前缀指纹: {}", PromptBuilder.staticFingerprint());
 
         LOGGER.info("[AIBot] 初始化完成。使用 /aibot spawn [名字] 生成智能体；"
@@ -145,7 +140,6 @@ public class Aibot implements ModInitializer {
         this.server = server;
         try {
             // 服务器工作目录（单人存档目录 / 服务端根目录）
-            // 注意：1.21.11 的 getServerDirectory() 直接返回 Path（1.20.1 返回 File，需要 .toPath()）
             Path gameDir = server.getServerDirectory();
 
             this.configStore = new ConfigStore(gameDir);
@@ -176,6 +170,9 @@ public class Aibot implements ModInitializer {
             LOGGER.info("[AIBot] 上下文压缩：窗口 {} 条，预算 {} token",
                     config.contextWindow, config.contextTokenBudget);
             LOGGER.info("[AIBot] 智能体上限：{} 个", config.maxBots);
+            LOGGER.info("[AIBot] 自主模式：{}，spawn 后自动开始：{}",
+                    config.autonomousMode ? "开启（无人干预时自主游玩）" : "关闭",
+                    config.autoStartOnSpawn ? "是" : "否");
 
             LOGGER.warn("[AIBot] 提醒：智能体会自动修改世界，长期挂机前请务必备份存档！");
 
@@ -215,17 +212,15 @@ public class Aibot implements ModInitializer {
      * <p>用 Fabric 的 {@code ServerMessageEvents.CHAT_MESSAGE}，
      * 它会在消息广播时触发，覆盖普通聊天与 /say 等命令发言。</p>
      *
-     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：fabric-message-api-v1
-     * 在 1.21.1 上是 7.0.10，其 {@code ChatMessage} 函数式接口签名是
-     * {@code (PlayerChatMessage, ServerPlayer, ChatType.Bound)} ——
-     * 与 1.20.1 完全一致，因此这段代码两个模块可以逐字相同。
-     * 且 1.21.11 的 {@code PlayerChatMessage.signedContent()} 依然存在
-     * （内部委托给 {@code signedBody().content()}），会返回玩家输入的原文
-     * （未加聊天装饰，也未包含 &lt;名字&gt; 前缀），正是我们需要的。</p>
-     *
      * <p>注意：智能体自己发的话也会进这里，但
      * {@link MultiBotManager#hearChat} 会按说话者名字把自己过滤掉，
      * 避免它们听见自己的话而无限自问自答。</p>
+     *
+     * <p><b>1.21.11 版本差异</b>：回调签名与 1.20.1 相同，都是
+     * {@code (PlayerChatMessage, ServerPlayer, ChatType.Bound)}；
+     * 但 1.21.11 的 {@code PlayerChatMessage} <b>没有</b> {@code signedContent()}，
+     * 取纯文本要用 {@code decoratedContent().getString()}
+     * （也可以用 {@code signedBody().content()}，但前者对未签名消息更稳妥）。</p>
      */
     private void registerChatListener() {
         try {
@@ -236,9 +231,8 @@ public class Aibot implements ModInitializer {
                         }
                         try {
                             String speaker = sender.getName().getString();
-                            // 直接取签名正文的纯文本；不要用 decoratedContent()，
-                            // 那会把 <名字> 前缀和聊天样式一并带进来。
-                            String text = message.signedContent();
+                            // 1.21.11 没有 signedContent()，用已装饰内容的纯文本
+                            String text = message.decoratedContent().getString();
                             // 步号只用于让模型判断新旧，取当前最大值即可
                             this.botManager.hearChat(speaker, text, this.tickCounter);
                         } catch (Throwable t) {

@@ -548,7 +548,7 @@ public final class TickActionDriver {
             return false;
         }
         if (slot < 9) {
-            bot.getInventory().selected = slot;
+            bot.getInventory().setSelectedHotbarSlot(slot);
         }
 
         // 站近一点再放
@@ -640,8 +640,8 @@ public final class TickActionDriver {
         BlockPos front = BlockPos.containing(ahead.x, pos.y, ahead.z);
         BlockState frontState = level.getBlockState(front);
         BlockState frontUp = level.getBlockState(front.above());
-        boolean blocked = !frontState.isAir() && frontState.isSolidRender(front);
-        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender(front.above());
+        boolean blocked = !frontState.isAir() && frontState.isSolidRender();
+        boolean canPass = frontUp.isAir() || !frontUp.isSolidRender();
         return blocked && canPass && bot.onGround();
     }
 
@@ -803,7 +803,7 @@ public final class TickActionDriver {
         }
 
         if (bestSlot >= 0) {
-            inv.selected = bestSlot;
+            inv.setSelectedHotbarSlot(bestSlot);
         }
     }
 
@@ -893,7 +893,7 @@ public final class TickActionDriver {
         bot.setYHeadRot(yaw);
         bot.zza = MOVE_FORWARD;
         bot.xxa = 0.0f;
-        if (shouldJumpToward(((ServerLevel) bot.level()), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
+        if (shouldJumpToward((ServerLevel) bot.level(), new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5))) {
             bot.setJumping(true);
         }
     }
@@ -957,7 +957,7 @@ public final class TickActionDriver {
         }
         // 切到对应快捷栏槽位（等价于真人滚轮/数字键切换）
         if (slot < 9) {
-            bot.getInventory().selected = slot;
+            bot.getInventory().setSelectedHotbarSlot(slot);
         }
 
         // 站到能碰到目标的位置
@@ -1032,7 +1032,7 @@ public final class TickActionDriver {
 
         // 切到手上
         if (slot < 9) {
-            bot.getInventory().selected = slot;
+            bot.getInventory().setSelectedHotbarSlot(slot);
         }
 
         ItemStack stack = bot.getInventory().getSelected();
