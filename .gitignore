@@ -37,3 +37,7 @@ config/aibot/config.json
 
 # ---- 本地 JDK / 工具目录（本项目开发时用到的临时 JDK）----
 tools/
+
+# ---- 打包产物：jar 通过 GitHub Releases 分发，不入库 ----
+release/
+dist/
