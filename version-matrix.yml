@@ -113,7 +113,7 @@ generations:
     loom: "1.17.19"
     gradle: "9.5.1"
     note: "现有版本线，本项目已实现。"
-    status: pending
+    status: ready
 
   # ============ 1.20.2 ~ 1.20.6 ============
   - id: fab-1.20.6
@@ -176,7 +176,7 @@ generations:
     loom: "1.17.19"
     gradle: "9.5.1"
     note: "现有版本线，本项目已实现。"
-    status: pending
+    status: ready
 
   # ============ 26.1 ~ 26.1.2 ============
   - id: fab-26.1.2
@@ -212,4 +212,4 @@ generations:
     loom: "1.17.21"
     gradle: "9.5.1"
     note: "现有版本线，本项目已实现。"
-    status: pending
+    status: ready
