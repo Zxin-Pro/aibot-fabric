@@ -457,7 +457,7 @@ public final class AutoLoop {
         String dimension = "";
         int px = 0, py = 0, pz = 0;
         try {
-            ServerLevel level = (ServerLevel) player.level();
+            ServerLevel level = (ServerLevel) ((ServerLevel) player.level());
             px = player.blockPosition().getX();
             py = player.blockPosition().getY();
             pz = player.blockPosition().getZ();
@@ -570,7 +570,7 @@ public final class AutoLoop {
             return;
         }
 
-        player.level().getServer().execute(() -> {
+        ((ServerLevel) player.level()).getServer().execute(() -> {
             try {
                 ActionParser.ParsedAction parsed = ActionParser.parse(content);
                 if (parsed == null) {
@@ -691,7 +691,7 @@ public final class AutoLoop {
         if (player == null) {
             return;
         }
-        ServerLevel level = (ServerLevel) player.level();
+        ServerLevel level = (ServerLevel) ((ServerLevel) player.level());
         String type = parsed.getString("type", "other");
         String name = parsed.getString("name", type);
         int x = parsed.getInt("x", player.blockPosition().getX());

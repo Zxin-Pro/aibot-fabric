@@ -146,7 +146,8 @@ public class Aibot implements ModInitializer {
         try {
             // 服务器工作目录（单人存档目录 / 服务端根目录）
             // 注意：1.21.11 的 getServerDirectory() 直接返回 Path（1.20.1 返回 File，需要 .toPath()）
-            Path gameDir = server.getServerDirectory();
+            // 1.20.6 的 getServerDirectory() 返回 File（1.21.x 起直接返回 Path）
+            Path gameDir = server.getServerDirectory().toPath();
 
             this.configStore = new ConfigStore(gameDir);
             this.profileStore = new BotProfileStore(gameDir);

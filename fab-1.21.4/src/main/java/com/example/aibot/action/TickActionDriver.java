@@ -348,7 +348,7 @@ public final class TickActionDriver {
             return;
         }
 
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         Vec3 pos = bot.position();
 
         double dx = walkTarget.x - pos.x;
@@ -661,7 +661,7 @@ public final class TickActionDriver {
      * @return true 表示已经朝安全方向施加了移动输入
      */
     public boolean avoidDanger() {
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         BlockPos feet = bot.blockPosition();
 
         for (int dx = -1; dx <= 1; dx++) {
@@ -715,7 +715,7 @@ public final class TickActionDriver {
      * @return true 表示正在前往掉落物
      */
     public boolean tryPickupNearby() {
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         AABB box = bot.getBoundingBox().inflate(4.0);
         var items = level.getEntities(bot, box,
                 e -> e instanceof net.minecraft.world.entity.item.ItemEntity && e.isAlive());
@@ -808,7 +808,7 @@ public final class TickActionDriver {
     }
 
     private void tickMine() {
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
 
         if (mineTarget == null || targetBlock == null) {
             fail("没有挖掘目标");
@@ -940,7 +940,7 @@ public final class TickActionDriver {
             return;
         }
 
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
 
         // 已经放好了（原版放置成功后状态会变）
         BlockState now = level.getBlockState(placePos);
@@ -1062,7 +1062,7 @@ public final class TickActionDriver {
     // ------------------------------------------------------------------
 
     private void tickAttack() {
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
 
         // 原版攻击冷却：真人必须等冷却条满才能打出满伤害
         float cooldown = bot.getAttackStrengthScale(0.5f);
@@ -1114,7 +1114,7 @@ public final class TickActionDriver {
     // ------------------------------------------------------------------
 
     private void tickPickup() {
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         AABB box = bot.getBoundingBox().inflate(8.0);
         List<Entity> items = level.getEntities(bot, box,
                 e -> e instanceof net.minecraft.world.entity.item.ItemEntity && e.isAlive());

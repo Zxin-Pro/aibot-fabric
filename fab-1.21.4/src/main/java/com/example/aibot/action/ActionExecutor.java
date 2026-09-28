@@ -176,7 +176,7 @@ public class ActionExecutor {
     /** 逃离威胁：朝远离威胁的方向走。 */
     protected ActionResult flee(ActionParser.ParsedAction parsed) {
         double distance = parsed.getDouble("distance", 16.0);
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
 
         AABB box = bot.getBoundingBox().inflate(16.0);
         List<Entity> threats = level.getEntities(bot, box, e -> e instanceof Monster && e.isAlive());
@@ -224,7 +224,7 @@ public class ActionExecutor {
             return ActionResult.fail("未知方块: " + blockId);
         }
 
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         BlockPos pos = findNearestBlock(level, target, 24);
         if (pos == null) {
             return ActionResult.fail("附近 24 格内找不到 " + shortId(blockId));
@@ -258,7 +258,7 @@ public class ActionExecutor {
         int dz = parsed.getInt("z", 0);
         BlockPos pos = base.offset(dx, dy, dz);
 
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         if (!level.isLoaded(pos)) {
             return ActionResult.fail("目标位置所在区块未加载");
         }
@@ -300,7 +300,7 @@ public class ActionExecutor {
             return ActionResult.fail("未知物品: " + itemId);
         }
 
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         var recipes = level.getServer().getRecipeManager();
         var ctx = net.minecraft.world.item.crafting.display.SlotDisplayContext.fromLevel(level);
 
@@ -487,7 +487,7 @@ public class ActionExecutor {
                             bot);
             net.minecraft.network.chat.PlayerChatMessage msg =
                     net.minecraft.network.chat.PlayerChatMessage.unsigned(bot.getUUID(), text);
-            bot.level().getServer().getPlayerList()
+            ((ServerLevel) bot.level()).getServer().getPlayerList()
                     .broadcastChatMessage(msg, bot, bound);
             return ActionResult.ok("说了: " + text);
         } catch (Throwable t) {
@@ -522,7 +522,7 @@ public class ActionExecutor {
 
     /** 睡觉：需要夜晚且有床（走原版 startSleepInBed）。 */
     protected ActionResult sleep(ActionParser.ParsedAction parsed) {
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
         long dayTime = level.getDayTime() % 24000L;
         if (dayTime < 13000L) {
             return ActionResult.fail("现在是白天，无法睡觉");
@@ -555,7 +555,8 @@ public class ActionExecutor {
         try {
             var result = bot.startSleepInBed(bedPos);
             if (result.left().isPresent()) {
-                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
+                // 1.21.4 的 BedSleepingProblem 还没有 message()，只能报枚举名
+                return ActionResult.fail("无法入睡：" + result.left().get().name());
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {
@@ -569,7 +570,7 @@ public class ActionExecutor {
         if (playerName.isEmpty()) {
             return ActionResult.fail("follow 动作缺少 player 参数");
         }
-        for (var p : bot.level().players()) {
+        for (var p : ((ServerLevel) bot.level()).players()) {
             if (p.getName().getString().equalsIgnoreCase(playerName)) {
                 double dist = p.distanceTo(bot);
                 driver.beginWalk(p.position(), (int) Math.max(200, dist / 0.215 * 3));
@@ -586,7 +587,7 @@ public class ActionExecutor {
      */
     protected ActionResult store(ActionParser.ParsedAction parsed) {
         String wanted = parsed.getString("item", "");
-        ServerLevel level = bot.level();
+        ServerLevel level = (ServerLevel) bot.level();
 
         net.minecraft.world.Container container = findNearestContainer(level, 6);
         if (container == null) {
