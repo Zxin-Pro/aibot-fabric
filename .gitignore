@@ -1,0 +1,39 @@
+# ---- Gradle ----
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+out/
+
+# ---- Fabric Loom 运行目录（gradlew runClient / runServer 生成）----
+run/
+runs/
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+bin/
+
+# ---- 系统 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- 日志与临时文件 ----
+*.log
+*.tmp
+hs_err_pid*.log
+replay_pid*.log
+
+# ---- 本地敏感配置：API Key 绝不入库 ----
+config/aibot/config.json
+**/config/aibot/config.json
+**/aibot/config.json
+
+# ---- 本地 JDK / 工具目录（本项目开发时用到的临时 JDK）----
+tools/

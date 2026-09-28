@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "aibot",
+  "version": "${version}",
+  "name": "aibot",
+  "description": "由大语言模型自主控制的 Minecraft AI 假玩家（可感知、规划、执行、对话）",
+  "authors": ["YourName"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.example.aibot.Aibot"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
