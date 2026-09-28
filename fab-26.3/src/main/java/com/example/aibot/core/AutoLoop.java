@@ -461,7 +461,7 @@ public final class AutoLoop {
             px = player.blockPosition().getX();
             py = player.blockPosition().getY();
             pz = player.blockPosition().getZ();
-            dimension = level.dimension().location().toString();
+            dimension = level.dimension().identifier().toString();
             stateJson = StateCollector.collect(player, this.goal);
         } catch (Throwable t) {
             LOGGER.log(Level.WARNING, "[AIBot] 状态采集失败", t);
@@ -700,7 +700,7 @@ public final class AutoLoop {
         String note = parsed.getString("note", "");
 
         boolean added = landmarkMemory.remember(type, name, x, y, z,
-                level.dimension().location().toString(), note);
+                level.dimension().identifier().toString(), note);
         shortTermMemory.add(step, "remember", type + " " + name, true,
                 added ? "已记录新地标" : "已更新地标");
         lastFeedback = "地标已记录：" + name + " @ (" + x + "," + y + "," + z + ")";
