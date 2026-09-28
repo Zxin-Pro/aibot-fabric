@@ -15,8 +15,15 @@ import java.util.List;
  */
 public final class ShortTermMemory {
 
-    /** 最多保留的记录条数（需求：最近 20 条）。 */
-    public static final int MAX_ENTRIES = 20;
+    /**
+     * 最多保留的记录条数。
+     *
+     * <p>这个值必须显著大于 {@link ContextCompressor} 的窗口大小，
+     * 否则记录会在「还没来得及被压缩成摘要」时就被丢弃，
+     * 造成历史信息凭空消失。压缩器负责把超出窗口的部分转成摘要，
+     * 这里只做兜底，防止极端情况下内存无限增长。</p>
+     */
+    public static final int MAX_ENTRIES = 200;
 
     /**
      * 单条记忆记录。
@@ -100,6 +107,16 @@ public final class ShortTermMemory {
             count++;
         }
         return count;
+    }
+
+    /**
+     * 取全部记录的快照（最旧在前）。
+     *
+     * <p>供 {@link ContextCompressor} 做滑窗与摘要用。
+     * 返回副本而非直接暴露内部队列，避免调用方在遍历时被并发修改。</p>
+     */
+    public synchronized List<Entry> snapshot() {
+        return new ArrayList<>(entries);
     }
 
     /** 清空短期记忆（/aibot memory clear）。 */

@@ -65,13 +65,66 @@ public final class PromptBuilder {
                                     String landmarks,
                                     String goal,
                                     String lastFeedback) {
+        return build(stateJson, shortTermMemory, longTermMemory, plan, landmarks,
+                goal, lastFeedback, "", "");
+    }
+
+    /**
+     * 构建提示词（含智能体身份，多智能体场景使用）。
+     *
+     * <p><b>身份必须放在动态后缀里，绝不能拼进静态前缀</b>：
+     * 名字和性格每个 bot 都不同，一旦进入前缀就会让缓存彻底失效。
+     * 放在动态区则不同 bot 之间仍能共享同一份前缀缓存。</p>
+     *
+     * @param botName     智能体名字
+     * @param personality 性格设定，可为空
+     */
+    public static BuiltPrompt build(String stateJson,
+                                    String shortTermMemory,
+                                    String longTermMemory,
+                                    String plan,
+                                    String landmarks,
+                                    String goal,
+                                    String lastFeedback,
+                                    String botName,
+                                    String personality) {
+        return build(stateJson, shortTermMemory, longTermMemory, plan, landmarks,
+                goal, lastFeedback, botName, personality, "");
+    }
+
+    /**
+     * 构建提示词（含智能体身份与聊天记录，完整版）。
+     *
+     * @param chatText 最近听到的聊天（固定格式），可为空
+     */
+    public static BuiltPrompt build(String stateJson,
+                                    String shortTermMemory,
+                                    String longTermMemory,
+                                    String plan,
+                                    String landmarks,
+                                    String goal,
+                                    String lastFeedback,
+                                    String botName,
+                                    String personality,
+                                    String chatText) {
         StringBuilder sb = new StringBuilder(2048);
 
         sb.append(StaticPrefix.DYNAMIC_SECTION_HEADER);
 
+        // 身份区放最前：模型需要先知道「我是谁」再理解任务
+        if (botName != null && !botName.trim().isEmpty()) {
+            sb.append("\n[你的身份]\n");
+            sb.append("你的名字是 ").append(botName.trim()).append("。\n");
+            if (personality != null && !personality.trim().isEmpty()) {
+                sb.append("你的性格与行事风格：").append(personality.trim()).append("\n");
+                sb.append("请让这个性格体现在你的动作选择与聊天语气里。\n");
+            }
+        }
+
         // 固定的小节顺序，且顺序本身也是固定的（缓存友好）。
         // 把「目标 + 计划」放最前，因为这是模型最需要的上下文。
         sb.append("\n[当前长期目标]\n");
+
         sb.append(goal == null || goal.trim().isEmpty() ? "(未设定，以生存和探索为主)" : goal.trim());
         sb.append("\n");
 
@@ -87,6 +140,10 @@ public final class PromptBuilder {
 
         sb.append("\n[当前世界状态]\n");
         sb.append(stateJson == null ? "{}" : stateJson);
+        sb.append("\n");
+
+        sb.append("\n[聊天记录（你听到的其他玩家发言）]\n");
+        sb.append(chatText == null || chatText.trim().isEmpty() ? "(暂无)" : chatText.trim());
         sb.append("\n");
 
         sb.append("\n[短期记忆（最近的动作与结果）]\n");

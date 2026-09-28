@@ -28,8 +28,9 @@ public final class StaticPrefix {
      * <p>这是整个请求里最长、最稳定的一段，也是缓存收益最大的部分。</p>
      */
     public static final String SYSTEM_PROMPT =
-            "你是一个在 Minecraft Java 版中行动的 AI 假玩家，名字叫 AIBot。\n"
+            "你是一个在 Minecraft Java 版中行动的 AI 假玩家。\n"
             + "你的任务是根据当前游戏状态，自主决定下一步要执行的单个动作，帮助实现用户的长期目标。\n"
+            + "你的名字、性格与当前目标会由动态上下文告知；始终按那份身份设定行动。\n"
             + "\n"
             + "【核心规则】\n"
             + "1. 你每次只能输出一个 JSON 对象，不要输出任何解释、寒暄、Markdown 代码块标记。\n"

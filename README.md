@@ -1,7 +1,11 @@
 ﻿# AIBot —— 由大语言模型自主控制的 Minecraft AI 假玩家
 
-一个 Fabric 模组：在 Minecraft 里加入一个由 LLM 驱动的假玩家。它能自主观察世界、规划任务、执行动作、
-与玩家对话，并在无人干预下**长期持续自主游玩**。**支持 Minecraft 1.20.1 / 1.21.1 / 1.21.11 / 26.3 四个版本。**
+一个 Fabric 模组：在 Minecraft 里加入由 LLM 驱动的**假玩家**。它能自主观察世界、规划任务、执行动作、
+与玩家对话，并在无人干预下**长期持续自主游玩**。可以同时生成**多个**智能体，
+每个都有**自定义名字与性格**。**支持 Minecraft 1.20.1 / 1.21.1 / 1.21.11 / 26.3 四个版本。**
+
+> **v0.5.0 新增**：多智能体并发、自定义名字/性格（参考 Carpet）、**上下文压缩**（可以真正一直玩下去）、
+> 智能体能**听到并回应**玩家聊天。详见第 0.6 节。
 
 > 本文件为 **UTF-8（带 BOM）** 编码。如果你在任何地方看到中文显示成 `???`，
 > 请用 UTF-8 打开本文件（见第 13 节）。
@@ -75,7 +79,7 @@
 
 1. **`PlayerList.respawn()` 会丢弃我们的子类。**
    原版内部是 `new ServerPlayer(...)`，重生后拿到的是**普通 ServerPlayer**。
-   - `FakePlayerManager` 同时保存 `currentBot` 与 `plainBot`，用 `getPlayer()` 统一取；
+   - `MultiBotManager.Agent` 同时保存 `entity` 与 `rebound`，用 `player()` 统一取；
    - `ActionExecutor` / `StateCollector` / `TickActionDriver` 参数类型都是 `ServerPlayer`。
 2. **动作是跨 tick 的，不是瞬间的。**
    `execute()` 返回 `async=true` 表示「已启动」，
@@ -84,7 +88,102 @@
    移动输入（`zza`/`xxa`）是被**玩家自己的 tick** 消费的，
    放在 `END_SERVER_TICK` 会慢一拍且可能被原版重置。
 4. **重生保留物品栏**（`respawn(player, true)`）。
-5. **计划跨重启持久化**到 `config/aibot/plan.json`。
+5. **计划跨重启持久化**到 `config/aibot/memory-<名字>-plan.json`。
+6. **一个智能体出错不能拖垮别人。**
+   `MultiBotManager.tick()` 对每个 agent 单独 try/catch，
+   出错的只停它自己，不影响其他智能体，更不会打断服务器主循环。
+
+---
+
+## 0.6 多智能体 + 自定义名字 + 上下文压缩（v0.5.0 新增）
+
+### 0.6.1 可以同时跑很多个智能体
+
+每个智能体都是一个**独立完整的原版玩家**：自己的实体、自己的 UUID、自己的目标、
+自己的记忆文件。服务器、TAB 列表、聊天栏都当它是另一个真人。
+
+```
+/aibot spawn 小明
+/aibot spawn 阿强
+/aibot personality 小明 谨慎的农夫，喜欢种地，遇到怪物就躲
+/aibot personality 阿强 莽撞的矿工，爱冒险，看见矿洞就想钻
+/aibot goal 小明 建一个农场并储备 64 个面包
+/aibot goal 阿强 挖到钻石并造一套铁装备
+/aibot auto all on
+```
+
+| 特性 | 说明 |
+|---|---|
+| **自定义名字** | `/aibot spawn <名字>`，遵循原版规则（3~16 字符，字母数字下划线）。**名字即身份**，与 Carpet 一致 |
+| **同名 = 同一个玩家** | UUID 由名字散列得到，因此移除后重新 spawn，**背包与统计数据会延续** |
+| **性格** | `/aibot personality <名字> <描述>`，会进入提示词，影响动作选择与聊天语气 |
+| **独立记忆** | 每个 bot 一份 `memory-<名字>.json` / `landmarks-<名字>.json`，互不污染 |
+| **数量上限** | `maxBots`（默认 5），因为每个都要独立发 LLM 请求，费用线性增长 |
+| **共享 LLM 客户端** | 所有 bot 复用同一份静态前缀，命中同一份服务端 KV 缓存，边际成本远低于各建一个 |
+
+> ⚠️ 名字合法性会**提前校验**。非法名字（带中文、空格、过长）如果直接塞给
+> `placeNewPlayer`，会抛出难以理解的异常，甚至产生无法移除的幽灵玩家。
+
+### 0.6.2 上下文压缩（这是「能一直玩下去」的真正前提）
+
+**问题**：一个真正长期自主运行的智能体，玩几小时就是几千步。
+如果把每一步都塞进提示词，上下文会无限膨胀 —— 最后必然触发 API 上限，
+不但贵，模型还会被陈旧的流水账淹没、判断力下降。
+
+**方案**（`ContextCompressor`，三层，从便宜到贵）：
+
+| 层 | 做法 | 效果 |
+|---|---|---|
+| 1. 滑窗 | 只保留最近 N 条完整动作记录（默认 12） | 细节有界 |
+| 2. 摘要 | 被挤出去的记录按每 5 条聚合成一句阶段摘要 | 历史不丢失，压缩成结论 |
+| 3. 预算 | 按估算 token 数硬性裁剪（默认 1500），优先丢最早的摘要 | 逼近上限时兜底 |
+
+实测（跑 `tools/CompressorTest`，3000 步模拟）：
+
+```
+提示词长度: 最小=132  最大=1449  平均=1412     ← 恒定，不随步数增长
+压缩统计: 已压缩 2988 条历史 → 16 条摘要
+```
+
+**两个关键设计决定：**
+
+1. **不调用 LLM 做摘要。** 额外调用既费钱又变慢，更严重的是
+   LLM 摘要每次措辞都不同，会破坏提示词缓存的**字节一致性**，导致缓存全部失效。
+   这里用确定性规则聚合（统计主导动作、成功/失败次数、代表性失败原因）。
+2. **格式完全确定**，无哈希、无时间戳、无随机顺序 —— 因此同一状态下
+   反复构建的提示词字节完全一致，前缀缓存不会被打穿。
+
+用 `/aibot context stats [名字]` 查看压缩情况。
+
+### 0.6.3 智能体能听到你说话
+
+之前的版本里智能体**只能说、不能听** —— 你跟它讲话它毫无反应，这是最不像真人的地方。
+
+现在通过 Fabric 的 `ServerMessageEvents.CHAT_MESSAGE` 监听聊天，
+喂给每个智能体（会跳过它自己说的话，避免自问自答）。
+有人在最近 3 步内跟它说话时，提示词会加一条强提醒：
+
+> 【有人在跟你说话】XXX 说：「…」。请先用 chat 动作简短回应他，再继续手上的事。
+
+### 0.6.4 这一版修掉的不合理之处
+
+| 问题 | 之前的做法 | 现在 |
+|---|---|---|
+| **步数上限悄悄生效** | `ConfigStore.normalize()` 把 `maxStepsPerSession<=0` 强制改成 **200**，跑满 200 步就自己停了，与「一直玩下去」的承诺矛盾 | 允许 0/负数 = 真·无上限（**这是真实存在过的 bug**） |
+| **说话像系统公告** | `broadcastSystemMessage`，黄色斜体、无玩家名牌、不进聊天记录、插件监听不到 | 走原版 `broadcastChatMessage`，和真人发言完全一致 |
+| **转头瞬移** | `look()` 把 yaw/pitch 直接归零，一 tick 猛转 180° | 在当前朝向前后 ±60° 小幅扫视，并同步给客户端 |
+| **记忆文件混在一起** | 所有 bot 共用一个 `memory.json`，互相覆盖 | 按名字隔离 |
+| **机器人名字写死在提示词里** | `StaticPrefix` 里硬编码「名字叫 AIBot」 | 移到动态区，因此多 bot 才能共享前缀缓存 |
+| **智能体听不见** | 无 | 见 0.6.3 |
+
+### 0.6.5 仍然不做的事（有意为之）
+
+这些**故意不做**，因为它们属于作弊或伪造身份，不是「像真人」：
+
+- ❌ 不伪造 Mojang 皮肤签名（`textures` 属性）—— 那属于伪造正版身份。
+  想换外观请在 `skinOwner` 填一个正版玩家名，让服务端按名字查皮肤（原版机制）。
+- ❌ 不瞬移、不凭空放方块、不瞬间结算进食、不无视攻击冷却。
+- ❌ 不在多人服务器上给假玩家超级权限。
 
 ---
 
@@ -146,10 +245,10 @@ networkTimeout=120000
 
 | Minecraft | 下载文件 |
 |---|---|
-| 1.20.1 | `aibot-0.4.0-1.20.1.jar` |
-| 1.21.1 | `aibot-0.4.0-1.21.1.jar` |
-| 1.21.11 | `aibot-0.4.0-1.21.11.jar` |
-| 26.3 | `aibot-0.4.0-26.3.jar` |
+| 1.20.1 | `aibot-0.5.0-1.20.1.jar` |
+| 1.21.1 | `aibot-0.5.0-1.21.1.jar` |
+| 1.21.11 | `aibot-0.5.0-1.21.11.jar` |
+| 26.3 | `aibot-0.5.0-26.3.jar` |
 
 装法见第 3 节，配置见第 4 节。
 
@@ -204,7 +303,7 @@ gradlew.bat build --no-daemon
 
 ### 产物位置
 
-每个模块构建后产出（版本号以实际为准，当前为 `0.4.0`）：
+每个模块构建后产出（版本号以实际为准，当前为 `0.5.0`）：
 
 ```
 fab-<版本>/build/libs/aibot-<版本号>.jar           <- 装进 mods 的就是这个
@@ -271,46 +370,72 @@ mods 目录位置：
 | `survivalReflex` | `true` | **生存反射**：血量/饥饿过低时绕过 LLM 自保 |
 | `stuckThreshold` | `3` | 连续失败多少次判定为卡住 |
 | `persistPlan` | `true` | 计划持久化，重启后接着做 |
-| `botName` | `AIBot` | 假玩家名字 |
+| `botName` | `AIBot` | 默认智能体名字（`/aibot spawn` 不带名字时用它） |
+| **`maxBots`** | `5` | **同时允许的智能体数量上限**（每个都独立发请求，费用线性增长） |
+| **`autoSpawnOnStart`** | `false` | 服务器启动时自动拉起所有 `autoLoop=true` 的档案（重启即续玩） |
+| **`contextWindow`** | `12` | **上下文压缩**：保留最近多少条完整动作细节 |
+| **`contextTokenBudget`** | `1500` | **上下文压缩**：动态部分的目标 token 预算 |
 
 ---
 
 ## 6. 使用 / 命令
 
-所有命令需要 **OP 权限（等级 2）**。
+所有命令需要 **OP 权限（等级 2）**。涉及具体智能体的命令都要带**名字**。
 
 ```
-/aibot spawn                          生成假玩家
-/aibot remove                         移除假玩家（同时停止自主循环）
-/aibot goal <自然语言>                 设置长期目标（会清空旧计划并触发重新规划）
-/aibot auto on                        开启自主循环（无步数上限，持续运行）
-/aibot auto off                       停止自主循环
-/aibot status                         查看状态（含缓存命中率、计划进度、重生开关）
-/aibot plan show                      查看当前执行计划与进度
-/aibot plan clear                     清空计划（下一轮重新规划）
-/aibot landmark show                  查看已记录的地标及距离
-/aibot landmark clear                 清空地标记忆
-/aibot cache stats                    查看缓存统计与节省费用
-/aibot cache reset                    重置缓存统计
-/aibot memory show                    查看短期/长期记忆
-/aibot memory clear                   清空记忆
-/aibot do {"action":"mine","block":"minecraft:oak_log"}    手动执行一个动作（调试用）
-/aibot config show                    显示当前配置
-/aibot config set <key> <value>       修改配置
+--- 生成与管理 ---
+/aibot spawn [名字]                    生成智能体（不写名字则用配置里的 botName）
+/aibot remove <名字|all>               移除智能体（档案保留，可再次 spawn 恢复）
+/aibot list                            列出所有智能体及其状态/性格/目标
+
+--- 身份与目标 ---
+/aibot personality <名字> <描述>        设置性格（影响动作选择与聊天语气）
+/aibot goal <名字> <自然语言>           设置长期目标（会清空旧计划并触发重新规划）
+
+--- 自主运行 ---
+/aibot auto <名字|all> on|off          开关自主循环（无步数上限，持续运行）
+/aibot status [名字]                   查看状态（含缓存命中率、上下文压缩、计划进度）
+
+--- 调试与统计 ---
+/aibot cache stats                     查看缓存统计与节省费用
+/aibot cache reset                     重置缓存统计
+/aibot context stats [名字]            查看上下文压缩情况（压缩了多少条历史）
+/aibot context clear [名字]            清空某智能体的上下文与短期记忆
+/aibot do <名字> {"action":...}         手动执行一个动作（调试用）
+/aibot config show                     显示当前配置
+/aibot config set <key> <value>        修改配置
 ```
 
 ### 典型流程（长期挂机）
 
+**单智能体：**
+
 ```
 /aibot config set apiKey sk-xxxx
 /aibot config set baseUrl https://api.deepseek.com
-/aibot spawn
-/aibot goal 建造一个有工作台和箱子的石屋，然后持续挖矿积累资源
-/aibot auto on
+/aibot spawn 小明
+/aibot personality 小明 谨慎的农夫，优先种地和储存食物
+/aibot goal 小明 建造一个有工作台和箱子的石屋，然后持续挖矿积累资源
+/aibot auto 小明 on
 ```
 
-开了 `auto on` 之后就可以不管它了：它会自己拆解目标、执行、死亡重生、跳过做不到的任务。
-想看进展用 `/aibot plan show` 和 `/aibot status`，想停用 `/aibot auto off`。
+**多智能体同时玩：**
+
+```
+/aibot spawn 阿强
+/aibot personality 阿强 莽撞的矿工，爱冒险，看见矿洞就想钻
+/aibot goal 阿强 挖到钻石并造一套铁装备
+/aibot auto all on
+```
+
+开了 `auto on` 之后就可以不管它了：它会自己拆解目标、执行、死亡重生、跳过做不到的任务、
+压缩历史、被人搭话时回话。**这就是「一直自己玩下去」**。
+
+想看进展用 `/aibot list`、`/aibot plan show`、`/aibot status <名字>`，
+想停用 `/aibot auto <名字|all> off`。
+
+> 想让服务器**重启后自动拉起**之前记录的智能体：
+> `/aibot config set autoSpawnOnStart true`（会拉起所有 `autoLoop=true` 的档案）。
 
 ### 新增动作（LLM 可用）
 
@@ -386,16 +511,64 @@ gradlew.bat runClient
 
 1. 按上面步骤装好 mod。
 2. 进存档，`/aibot config set apiKey ...` 配好密钥。
-3. `/aibot spawn` —— 假玩家应出现在你附近，且 TAB 列表里能看到它。
-4. `/aibot do {"action":"chat","message":"你好"}` —— 聊天栏应出现假玩家说的话。
-5. `/aibot do {"action":"mine","block":"minecraft:oak_log"}` —— 附近橡木被挖掉、掉落物进背包。
-6. `/aibot auto on` —— 观察它每 2 秒决策一次，日志里有 `第 N 步 xxx -> 成功/失败`。
+3. `/aibot spawn 小明` —— 假玩家应出现在你附近，且 TAB 列表里能看到它。
+4. `/aibot do 小明 {"action":"chat","message":"你好"}` —— 聊天栏应出现假玩家说的话。
+5. `/aibot do 小明 {"action":"mine","block":"minecraft:oak_log"}` —— 附近橡木被挖掉、掉落物进背包。
+6. `/aibot auto 小明 on` —— 观察它每 2 秒决策一次，日志里有 `第 N 步 xxx -> 成功/失败`。
 7. `/aibot cache stats` —— 确认缓存命中率（跑 10+ 步后再看更有意义）。
+
+### 8.2.1 重点验证 v0.5.0 的新功能
+
+**① 多智能体 + 自定义名字**
+
+```
+/aibot spawn 阿强
+/aibot personality 阿强 莽撞的矿工，爱冒险
+/aibot auto all on
+/aibot list                      # 应看到 小明 和 阿强 两条，各自独立步数
+```
+两个智能体应能同时活动、互不干扰。
+
+**② 同名恢复背包（Carpet 行为）**
+
+```
+（先让 小明 挖点东西）
+/aibot remove 小明
+/aibot spawn 小明
+```
+重新 spawn 后，**背包里的东西应该还在** —— 因为 UUID 由名字散列而来，
+服务器认为它是同一个玩家。如果背包清空了，说明 UUID 生成有问题。
+
+**③ 上下文压缩（这是「一直玩下去」的关键）**
+
+```
+/aibot context stats 小明
+```
+放着挂机几十分钟，反复看这条命令：`已压缩 N 条历史` 的 N 应持续增长，
+而 `/aibot status` 里的提示词长度应该**基本恒定**（不随步数线性变长）。
+如果提示词一直变长，说明压缩没生效，长时间运行最终会超上下文上限。
+
+**④ 聊天回应**
+
+在游戏里直接对着智能体打字说话（不要用 `/aibot do`），例如：
+```
+小明你在干嘛
+```
+它应该在最近几次决策内用 chat 动作回你一句。如果完全没反应，
+检查日志里有没有「注册聊天监听失败」。
+
+**⑤ 死亡自动重生**
+
+```
+/aibot do 小明 {"action":"chat","message":"测试重生"}
+/kill 小明
+```
+它应在 5 秒后自动重生并继续自主循环，`/aibot list` 里仍显示 `[存活]`。
 
 ### 8.3 重点验证 A\* 寻路
 
 ```
-/aibot do {"action":"move","x":50,"y":64,"z":50}
+/aibot do 小明 {"action":"move","x":50,"y":64,"z":50}
 ```
 
 **在它和目标之间故意放一堵墙**，看它表现为哪一种：
@@ -410,8 +583,23 @@ gradlew.bat runClient
 另外测挖矿是否**按硬度耗时**、工具是否**掉耐久**：
 
 ```
-/aibot do {"action":"mine","block":"minecraft:stone"}
+/aibot do 小明 {"action":"mine","block":"minecraft:stone"}
 ```
+
+### 8.3.1 离线自测上下文压缩
+
+压缩逻辑不依赖 Minecraft，可以脱离游戏直接跑（需要 JDK）：
+
+```bat
+cd aibot-fabric
+javac -encoding UTF-8 -d tests\out tests\CompressorTest.java ^
+  fab-1.20.1\src\main\java\com\example\aibot\memory\ContextCompressor.java ^
+  fab-1.20.1\src\main\java\com\example\aibot\memory\ShortTermMemory.java
+java -cp tests\out CompressorTest
+```
+
+模拟跑 3000 步，断言提示词长度有界、历史以摘要保留、预算截断生效、clear() 正常。
+期望输出 `>>> 全部测试通过`。
 
 ### 8.4 服务端测试
 
@@ -444,10 +632,16 @@ gradlew.bat runClient --info
 | `程序包 net.minecraft.core.component 不存在` | 1.20.1 没有 `DataComponents`（1.20.5+ 才有） | 1.20.1 用 `stack.getItem().isEdible()`（本项目已处理） |
 | `不兼容的类型: Level无法转换为ServerLevel` | 1.21.1 及以前 `bot.level()` 返回 `Level` | 用 `bot.serverLevel()`（1.21.11+ 才是 `level()`） |
 | `Item id not set` | 1.21.2+ 注册物品必须 `setId` | 本项目不注册新物品，不受影响 |
-| 假玩家生成了但 TAB 列表看不到 | 没有调用 `placeNewPlayer` 入服 | 本项目已在 `FakePlayerManager` 中调用 |
+| 假玩家生成了但 TAB 列表看不到 | 没有调用 `placeNewPlayer` 入服 | 本项目已在 `MultiBotManager.spawn()` 中调用 |
+| `spawn` 报名字非法 | 原版玩家名规则：3~16 字符，仅字母数字下划线 | 换一个合法名字；本项目会提前校验并给出具体原因 |
+| 一直停在 200 步就自己停了 | 旧版本 `ConfigStore.normalize()` 把 `maxStepsPerSession<=0` 强制改成 200 | **v0.5.0 已修**。若你从旧版升级，检查配置文件里的实际值 |
+| 智能体不回应我说的话 | 聊天监听没注册成功（版本间签名差异） | 看日志有没有「注册聊天监听失败」；有则说明该版本的聊天事件 API 不同 |
+| 提示词越来越长 / 请求被拒 | 上下文压缩没生效 | `/aibot context stats` 看压缩计数；正常应随步数增长而提示词长度恒定 |
 | `/aibot` 命令没反应 | 权限不足 | 需要 OP 等级 2 |
-| LLM 调用一直失败 | 密钥/地址错误，或网络不通 | `/aibot config show` 核对；用 `/aibot do` 先验证本地动作 |
+| `/aibot status` 说找不到智能体 | 命令需要名字 | 用 `/aibot list` 看名字，再 `/aibot status <名字>` |
+| LLM 调用一直失败 | 密钥/地址错误，或网络不通 | `/aibot config show` 核对；用 `/aibot do <名字> {...}` 先验证本地动作 |
 | 缓存命中率一直 0 | 服务端不返回缓存字段，或模型/地址换了 | 确认服务端支持；保持 `model`/`baseUrl` 不变 |
+| 多智能体后费用涨得快 | 每个 bot 都独立发请求，费用线性增长 | 调低 `maxBots`，或给不重要的 bot `/aibot auto <名字> off` |
 
 ---
 
@@ -460,8 +654,9 @@ gradlew.bat runClient --info
 - **多人服务器**：让模组控制假玩家在他人服务器上活动**可能违反服务器规则**，
   也可能被视为作弊。**请只在单人存档或自己的服务器上使用。**
 - **遵守 Minecraft EULA**：本项目仅供学习与个人使用。
-- **成本控制**：`maxStepsPerSession` 默认 `0`（无限），token 会持续消耗。
-  先用 `/aibot cache stats` 观察花费，再决定要不要设上限。
+- **成本控制**：`maxStepsPerSession` 默认 `0`（无限），token 会持续消耗，
+  多智能体时是**线性叠加**。先用 `/aibot cache stats` 观察花费，
+  再用 `maxBots` 与逐个 `auto off` 控制规模。
 
 ---
 
@@ -491,9 +686,11 @@ src/main/java/com/example/aibot/
 │   ├── LLMClient.java               异步 HTTP 客户端（超时/重试/限流）
 │   └── CacheStats.java              缓存命中统计与费用估算
 ├── memory/
-│   ├── ShortTermMemory.java         短期记忆（最近 20 条，固定格式）
-│   ├── LongTermMemory.java          长期记忆（memory.json 持久化）
-│   └── LandmarkMemory.java          地标记忆（家 / 箱子 / 矿点）
+│   ├── ShortTermMemory.java         短期记忆（环形缓冲，供压缩器滑窗）
+│   ├── ContextCompressor.java       **上下文压缩**（滑窗 + 摘要 + token 预算）
+│   ├── LongTermMemory.java          长期记忆（memory-<名字>.json 持久化）
+│   ├── LandmarkMemory.java          地标记忆（家 / 箱子 / 矿点）
+│   └── ChatMemory.java              **聊天记忆**（听到的玩家发言）
 ├── state/
 │   └── StateCollector.java          状态采集 → 固定字段顺序 JSON
 ├── action/
@@ -503,12 +700,14 @@ src/main/java/com/example/aibot/
 │   └── TickActionDriver.java        逐 tick 动作驱动（走路/挖掘/放置/进食/攻击/拾取）
 ├── entity/
 │   ├── AIBotPlayer.java             假玩家实体（版本差异集中处）
-│   └── FakePlayerManager.java       生成/移除/聊天
+│   ├── BotProfile.java              **智能体档案**（名字/性格/目标/生成点）
+│   ├── BotProfileStore.java         **档案持久化**（bots.json）
+│   └── MultiBotManager.java         **多智能体管理**（生成/移除/重生/tick/听聊天）
 ├── core/
-│   ├── AutoLoop.java                自主循环状态机
+│   ├── AutoLoop.java                自主循环状态机（每个智能体一个实例）
 │   └── TaskPlan.java                结构化任务计划（任务栈 + 持久化）
 └── command/
-    └── AIBotCommand.java            /aibot 命令树
+    └── AIBotCommand.java            /aibot 命令树（按名字操作）
 ```
 
 ---
@@ -586,10 +785,20 @@ git show HEAD:README.md | more
   （材料必须齐全、产物按配方给）。结果与真人一致，但它不会「打开合成台」。
 - **不会主动加载区块**：没有客户端，所在区块若无其他玩家加载，
   状态加载会跳过（已做 `isLoaded` 防护）。
-- **假玩家同时只允许一个**（`FakePlayerManager` 单实例）。
+- **不再受「同时只有一个」限制**（v0.5.0 起）：可以同时跑多个智能体，
+  各自独立实体、独立记忆、独立循环。上限由 `maxBots` 控制。
 - **重生后实体不再是 `AIBotPlayer` 子类**：原版 `respawn` 会 new 普通 `ServerPlayer`，
   功能不受影响（所有执行器都按 `ServerPlayer` 编写）。
+- **上下文压缩是有损的**：久远历史会被聚合成摘要，具体到「第 37 步挖了几个石头」
+  这种细节会丢失。这是刻意的取舍 —— 用细节换「可以无限期运行」。
+  调大 `contextWindow` 可保留更多细节，代价是 token 消耗上升。
+- **摘要不调用 LLM**：用确定性规则聚合。好处是零额外成本且不破坏提示词缓存字节一致性，
+  代价是摘要不如 LLM 写得自然。若你更看重摘要质量，可以自己接一个摘要调用，
+  但**务必注意它会破坏缓存命中率**。
+- **皮肤**：离线服务器上所有假玩家都是默认皮肤（原版机制限制）。
+  正版服务器可在档案里填 `skinOwner` 借用某个正版玩家的外观。
+  **不伪造 Mojang 皮肤签名**（那属于伪造正版身份）。
 - **LLM 输出解析**：已做三重容错；若模型频繁输出非 JSON，
   建议强化 `StaticPrefix` 里的格式约束（注意保持前缀稳定以免掉缓存命中率）。
-- **仅编译期验证过**：寻路与真人机制的运行时行为**尚未实机测试**，
-  请按第 8.3 节自行验证。
+- **仅编译期验证过**：四个版本都能构建出可加载的 jar，但寻路、多智能体并发、
+  上下文压缩、聊天回应的**运行时行为尚未实机测试**，请按第 8 节自行验证。

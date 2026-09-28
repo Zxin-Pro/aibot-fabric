@@ -65,6 +65,28 @@ public class AIBotPlayer extends ServerPlayer {
      * @param name   玩家名
      */
     public AIBotPlayer(MinecraftServer server, ServerLevel level, String name) {
+        this(server, level, name, name);
+    }
+
+    /**
+     * 构造假玩家（支持指定皮肤归属名）。
+     *
+     * <p><b>关于皮肤</b>：GameProfile 里带的是「名字」，
+     * 服务端在有皮肤缓存（正版验证过的服务器）时会按名字查皮肤，
+     * 因此填一个正版玩家名就能借用其外观。
+     * 纯离线服务器上没有皮肤服务，任何名字都是默认皮肤（Steve/Alex），
+     * 这是原版机制限制，不是模组的问题。</p>
+     *
+     * <p><b>1.21.11 版本差异</b>：{@code ServerPlayer} 的构造是 4 参数，
+     * 比 1.20.1 多了 {@link ClientInformation}（语言、视距、皮肤部件等客户端信息），
+     * 这里用 {@code createDefault()} 补齐，等价于一个默认设置的客户端。</p>
+     *
+     * @param server    服务器实例
+     * @param level     目标世界
+     * @param name      玩家名（同时决定 UUID，必须唯一）
+     * @param skinOwner 皮肤归属名；为空则用 name
+     */
+    public AIBotPlayer(MinecraftServer server, ServerLevel level, String name, String skinOwner) {
         super(server, level, new GameProfile(offlineUuid(name), name), ClientInformation.createDefault());
         // 先建 cookie，再用它构造伪造连接（两者必须是同一个对象）
         this.cookie = CommonListenerCookie.createInitial(this.getGameProfile(), false);
@@ -76,6 +98,24 @@ public class AIBotPlayer extends ServerPlayer {
                 this.networkConnection,
                 this,
                 this.cookie);
+    }
+
+    /**
+     * 组装 GameProfile 的属性表（保留占位，当前构造路径用不到）。
+     *
+     * <p><b>1.21.11 版本差异</b>：这里的 {@code com.mojang.authlib.properties.PropertyMap}
+     * 在 1.21.11 所用的 authlib 版本中<b>没有无参构造器</b>
+     * （需要 {@code Multimap<String, Property>}），
+     * 与 1.20.1 的 authlib 不同。由于我们走的是「按名字查皮肤」的原版路径，
+     * 根本不需要手工填属性表，所以这里不实现它 —— 硬造一个空 Multimap
+     * 反而容易在 authlib 版本升级时再次编译失败。</p>
+     *
+     * <p>离线模式下 GameProfile 里没有 textures 属性，客户端会回退到默认皮肤
+     * （Steve/Alex），这是原版机制限制。我们不做伪造签名（那属于伪造正版身份，不做）。</p>
+     */
+    @SuppressWarnings("unused")
+    private static Object buildProperties(String name, String skinOwner) {
+        return null;
     }
 
     /** placeNewPlayer 需要与连接相匹配的 cookie。 */

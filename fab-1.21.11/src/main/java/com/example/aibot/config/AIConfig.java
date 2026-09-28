@@ -108,8 +108,25 @@ public class AIConfig {
     /** 单步超时（tick）。动作执行超过该时长视为卡住，触发换策略。 */
     public int stepTimeoutTicks = 200;
 
-    /** 假玩家名字。 */
+    /** 假玩家默认名字（多智能体时可被每个 bot 的档案覆盖）。 */
     public String botName = "AIBot";
+
+    /**
+     * 同时允许存在的智能体数量上限。
+     *
+     * <p>每个智能体都要独立发 LLM 请求，数量上去后费用与服务器负载
+     * 都是线性增长，因此必须有个闸门。默认 5。</p>
+     */
+    public int maxBots = 5;
+
+    /** 服务器启动时是否自动把档案库里标记了 autoLoop 的智能体全部拉起来。 */
+    public boolean autoSpawnOnStart = false;
+
+    /** 上下文压缩：保留最近多少条完整动作细节。 */
+    public int contextWindow = 12;
+
+    /** 上下文压缩：动态部分的目标 token 预算。 */
+    public int contextTokenBudget = 1500;
 
     /**
      * 是否只允许单人/自己的服务器使用（安全提示开关）。

@@ -75,9 +75,32 @@ public final class LandmarkMemory {
 
     private final Path file;
 
+    /** 单智能体地标记忆（兼容旧存档）。 */
     public LandmarkMemory(Path gameDir) {
+        this(gameDir, "default");
+    }
+
+    /**
+     * 按智能体名字隔离的地标文件。
+     *
+     * <p>多智能体场景下每个 bot 有自己探索到的地图知识，
+     * 共享一份会导致 A 记的「家」被 B 当成自己的家而乱跑。</p>
+     */
+    public LandmarkMemory(Path gameDir, String botName) {
         Path dir = gameDir.resolve("config").resolve("aibot");
-        this.file = dir.resolve("landmarks.json");
+        if (botName == null || botName.trim().isEmpty() || "default".equals(botName)) {
+            this.file = dir.resolve("landmarks.json");
+        } else {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < botName.length(); i++) {
+                char c = botName.charAt(i);
+                if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+                        || c >= '0' && c <= '9' || c == '_' || c == '-') {
+                    sb.append(c);
+                }
+            }
+            this.file = dir.resolve("landmarks-" + (sb.length() == 0 ? "bot" : sb) + ".json");
+        }
     }
 
     /** 从磁盘加载。 */
@@ -104,7 +127,7 @@ public final class LandmarkMemory {
             Files.createDirectories(this.file.getParent());
             LandmarkFile f = new LandmarkFile();
             f.landmarks = new ArrayList<>(this.landmarks);
-            Path tmp = this.file.resolveSibling("landmarks.json.tmp");
+            Path tmp = this.file.resolveSibling(this.file.getFileName() + ".tmp");
             Files.write(tmp, GSON.toJson(f).getBytes(StandardCharsets.UTF_8));
             try {
                 Files.move(tmp, this.file,

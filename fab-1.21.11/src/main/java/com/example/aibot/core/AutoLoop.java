@@ -4,11 +4,13 @@ import com.example.aibot.action.ActionExecutor;
 import com.example.aibot.action.TickActionDriver;
 import com.example.aibot.action.ActionParser;
 import com.example.aibot.config.AIConfig;
-import com.example.aibot.entity.AIBotPlayer;
-import com.example.aibot.entity.FakePlayerManager;
+import com.example.aibot.entity.BotProfile;
+import com.example.aibot.entity.MultiBotManager;
 import com.example.aibot.llm.CacheStats;
 import com.example.aibot.llm.LLMClient;
 import com.example.aibot.llm.PromptBuilder;
+import com.example.aibot.memory.ChatMemory;
+import com.example.aibot.memory.ContextCompressor;
 import com.example.aibot.memory.LandmarkMemory;
 import com.example.aibot.memory.LongTermMemory;
 import com.example.aibot.memory.ShortTermMemory;
@@ -22,18 +24,21 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * 自主循环：感知 → 决策 → 执行 → 记忆 的闭环。
+ * 单个智能体的自主循环：感知 → 决策 → 执行 → 记忆 的闭环（Minecraft 1.21.11 版本线）。
+ *
+ * <p><b>每个智能体一个实例</b>：循环持有自己的短期/长期/地标/聊天记忆与任务计划，
+ * 因此多个智能体之间完全隔离，各自有各自的目标与策略。
+ * 共享的只有底层的 LLM 客户端（连同它的前缀缓存收益）。</p>
  *
  * <p><b>长期自主运行的三项核心保障</b>（这是「让它一直玩下去」的关键）：</p>
  * <ol>
- *   <li><b>死亡自动重生</b>：通过 {@link #handleDeath} 检测死亡，
- *       等待 {@code respawnDelayTicks} 后调用
- *       {@link FakePlayerManager#respawn}，并从玩家列表重新取回新实例继续跑。
+ *   <li><b>死亡自动重生</b>：检测到死亡后等待 {@code respawnDelayTicks}，
+ *       调用 {@link MultiBotManager#respawn} 并取回新实例继续跑。
  *       循环本身<b>不会</b>因为死亡而停止。</li>
  *   <li><b>不再强制停机</b>：{@code maxStepsPerSession} 默认 0（无限）。
- *       若用户设了正数，到达后按 {@code autoRestart} 决定是否自动续跑。</li>
- *   <li><b>生存反射</b>：在 LLM 决策之外独立运行的安全网 ——
- *       血量过低强制逃跑/进食，这样不会因为 LLM 判断失误而猝死。</li>
+ *       即使设了正数，到达后也会按 {@code autoRestart} 自动续跑。</li>
+ *   <li><b>上下文压缩</b>：{@link ContextCompressor} 把久远的历史压成摘要，
+ *       保证提示词长度恒定，可以无限期运行而不撑爆上下文窗口。</li>
  * </ol>
  *
  * <p>状态机：</p>
@@ -65,11 +70,20 @@ public final class AutoLoop {
     private final AIConfig config;
     private final CacheStats cacheStats;
     private final LLMClient llmClient;
-    private final FakePlayerManager playerManager;
+    private final MultiBotManager bots;
     private final ShortTermMemory shortTermMemory;
     private final LongTermMemory longTermMemory;
     private final LandmarkMemory landmarkMemory;
     private final TaskPlan plan = new TaskPlan();
+
+    /** 本智能体的身份档案（名字、性格、目标）。 */
+    private final BotProfile profile;
+
+    /** 上下文压缩器：保证提示词长度恒定，可无限期运行。 */
+    private final ContextCompressor compressor = new ContextCompressor();
+
+    /** 聊天记忆：本智能体听到的玩家发言（让它能听、能回应）。 */
+    private final ChatMemory chatMemory;
 
     /** 是否处于运行状态（/aibot auto on 控制）。 */
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -124,20 +138,56 @@ public final class AutoLoop {
     private String activeActionName = "";
     private String activeActionParams = "";
 
+    /**
+     * 兼容旧签名的构造（不带聊天记忆）。
+     *
+     * <p>保留它是为了让只关心动作调试的代码路径不必构造 ChatMemory。</p>
+     */
     public AutoLoop(AIConfig config,
                     CacheStats cacheStats,
                     LLMClient llmClient,
-                    FakePlayerManager playerManager,
+                    MultiBotManager bots,
                     ShortTermMemory shortTermMemory,
                     LongTermMemory longTermMemory,
-                    LandmarkMemory landmarkMemory) {
+                    LandmarkMemory landmarkMemory,
+                    BotProfile profile) {
+        this(config, cacheStats, llmClient, bots, shortTermMemory, longTermMemory,
+                landmarkMemory, profile, new ChatMemory());
+    }
+
+    public AutoLoop(AIConfig config,
+                    CacheStats cacheStats,
+                    LLMClient llmClient,
+                    MultiBotManager bots,
+                    ShortTermMemory shortTermMemory,
+                    LongTermMemory longTermMemory,
+                    LandmarkMemory landmarkMemory,
+                    BotProfile profile,
+                    ChatMemory chatMemory) {
         this.config = config;
         this.cacheStats = cacheStats;
         this.llmClient = llmClient;
-        this.playerManager = playerManager;
+        this.bots = bots;
         this.shortTermMemory = shortTermMemory;
         this.longTermMemory = longTermMemory;
         this.landmarkMemory = landmarkMemory;
+        this.profile = profile;
+        this.chatMemory = chatMemory;
+    }
+
+    /** 本智能体的实体（可能为 null）。 */
+    private ServerPlayer self() {
+        MultiBotManager.Agent a = bots.get(profile.name);
+        return a == null ? null : a.player();
+    }
+
+    /** 取本智能体所在的服务器实例（重生等操作需要）。 */
+    private net.minecraft.server.MinecraftServer selfServer() {
+        ServerPlayer p = self();
+        if (p != null && p.level() != null && p.level().getServer() != null) {
+            return p.level().getServer();
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -155,7 +205,7 @@ public final class AutoLoop {
         }
 
         // ============ 1. 死亡处理（最高优先级） ============
-        if (!playerManager.isPlayerAlive()) {
+        if (!isAlive()) {
             handleDeath(serverTick);
             return;
         }
@@ -209,7 +259,7 @@ public final class AutoLoop {
                     tickCounter--;
                     return;
                 }
-                requestDecision(playerManager.getPlayer(), serverTick);
+                requestDecision(self(), serverTick);
                 break;
 
             case WAITING_FOR_LLM:
@@ -259,7 +309,20 @@ public final class AutoLoop {
         }
 
         // 执行重生
-        ServerPlayer revived = playerManager.respawn(playerManager.getServerOf());
+        ServerPlayer revived;
+        try {
+            net.minecraft.server.MinecraftServer srv = selfServer();
+            if (srv == null) {
+                LOGGER.warning("[AIBot] 无法取得服务器实例，重生延后重试");
+                diedAtTick = serverTick;
+                return;
+            }
+            revived = bots.respawn(srv, profile.name);
+        } catch (Throwable t) {
+            LOGGER.log(Level.WARNING, "[AIBot] 重生过程异常，稍后重试", t);
+            diedAtTick = serverTick;
+            return;
+        }
         if (revived == null) {
             LOGGER.warning("[AIBot] 重生失败，稍后重试");
             diedAtTick = serverTick; // 延后重试，避免每 tick 疯狂重试
@@ -282,7 +345,7 @@ public final class AutoLoop {
      */
     private boolean runSurvivalReflex() {
         // 用 ServerPlayer 而非 AIBotPlayer：重生后原版会把实体换成普通 ServerPlayer
-        ServerPlayer bot = playerManager.getPlayer();
+        ServerPlayer bot = self();
         if (bot == null) {
             return false;
         }
@@ -450,7 +513,11 @@ public final class AutoLoop {
         }
 
         // 2. 构建提示词（静态前缀 + 动态后缀）
-        String shortMem = shortTermMemory.serialize();
+        //
+        // 短期记忆走压缩器：把久远历史压成摘要，只保留最近若干条完整细节。
+        // 这是「可以一直玩下去」的关键 —— 没有它，提示词会随步数线性膨胀，
+        // 最终必然超上下文上限。
+        String shortMem = compressor.compress(shortTermMemory);
         String longMem = longTermMemory.serialize();
         String planText = plan.serialize();
         String landmarkText = landmarkMemory.serialize(px, py, pz, dimension);
@@ -471,8 +538,22 @@ public final class AutoLoop {
             awaitingPlan = false;
         }
 
+        // 有人刚跟说话 → 提醒模型先回应。
+        // 真人被搭话不会装没听见，这是「像真人」的重要细节。
+        String chatText = chatMemory.serialize();
+        if (chatMemory.hasRecent(stepCounter.get(), 3)) {
+            ChatMemory.Entry lastChat = chatMemory.last();
+            if (lastChat != null) {
+                feedback = (feedback == null ? "" : feedback + " ")
+                        + "【有人在跟你说话】" + lastChat.speaker() + " 说：「"
+                        + lastChat.message() + "」。请先用 chat 动作简短回应他，"
+                        + "再继续手上的事。回应要自然、符合你的性格。";
+            }
+        }
+
         PromptBuilder.BuiltPrompt prompt = PromptBuilder.build(
-                stateJson, shortMem, longMem, planText, landmarkText, this.goal, feedback);
+                stateJson, shortMem, longMem, planText, landmarkText, this.goal, feedback,
+                profile.name, profile.personality, chatText);
 
         // 3. 异步请求（不阻塞主线程）
         final long currentStep = stepCounter.incrementAndGet();
@@ -497,7 +578,7 @@ public final class AutoLoop {
      * Minecraft 世界操作必须在主线程执行，因此这里用服务器 execute 切回主线程。</p>
      */
     private void handleLlmResponse(String content, long step) {
-        ServerPlayer player = playerManager.getPlayer();
+        ServerPlayer player = self();
         if (player == null) {
             phase = Phase.COOLDOWN;
             tickCounter = config.decisionIntervalTicks;
@@ -602,7 +683,7 @@ public final class AutoLoop {
 
     /** 处理 LLM 返回的地标记录（remember 动作）。 */
     private void applyRemember(ActionParser.ParsedAction parsed, long step) {
-        ServerPlayer player = playerManager.getPlayer();
+        ServerPlayer player = self();
         if (player == null) {
             return;
         }
@@ -744,12 +825,18 @@ public final class AutoLoop {
         plan.importTasks(tasks);
     }
 
+    /** 本智能体是否存活。 */
+    public boolean isAlive() {
+        MultiBotManager.Agent a = bots.get(profile.name);
+        return a != null && a.alive();
+    }
+
     /** 生成 /aibot status 的状态文本。 */
     public String statusReport() {
-        ServerPlayer player = playerManager.getPlayer();
+        ServerPlayer player = self();
         StringBuilder sb = new StringBuilder();
-        sb.append("===== AIBot 状态 =====\n");
-        sb.append("假玩家: ").append(player == null ? "未生成"
+        sb.append("===== AIBot 状态：").append(profile.name).append(" =====\n");
+        sb.append("实体: ").append(player == null ? "未生成"
                 : player.getName().getString() + (player.isAlive() ? "（存活）" : "（已死亡）")).append("\n");
         sb.append("自主循环: ").append(running.get() ? "运行中" : "已关闭").append("\n");
         sb.append("当前阶段: ").append(phase).append("\n");
@@ -759,9 +846,14 @@ public final class AutoLoop {
         sb.append("自动重生: ").append(config.autoRespawn ? "开启" : "关闭").append("\n");
         sb.append("生存反射: ").append(config.survivalReflex ? "开启" : "关闭").append("\n");
         sb.append("长期目标: ").append(goal.isEmpty() ? "(未设定)" : goal).append("\n");
+        if (!profile.personality.isEmpty()) {
+            sb.append("性格: ").append(profile.personality).append("\n");
+        }
         sb.append("当前计划: ").append(plan.isEmpty() ? "(无)"
                 : plan.doneCount() + "/" + plan.size() + " 步已完成").append("\n");
         sb.append("地标数量: ").append(landmarkMemory.size()).append("\n");
+        sb.append("上下文压缩: ").append(compressor.shortSummary()).append("\n");
+        sb.append("聊天记忆: ").append(chatMemory.size()).append(" 条\n");
         sb.append("模型: ").append(config.model).append("\n");
         sb.append("API 地址: ").append(config.baseUrl).append("\n");
         sb.append("API Key: ").append(config.maskedApiKey()).append("\n");
@@ -770,6 +862,21 @@ public final class AutoLoop {
         sb.append("长期记忆: 成功 ").append(longTermMemory.successCount())
                 .append(" 条 / 失败 ").append(longTermMemory.failureCount()).append(" 条\n");
         return sb.toString();
+    }
+
+    /** 上下文压缩器（供命令层展示与清空）。 */
+    public ContextCompressor getCompressor() {
+        return compressor;
+    }
+
+    /** 聊天记忆（供命令层展示与清空）。 */
+    public ChatMemory getChatMemory() {
+        return chatMemory;
+    }
+
+    /** 本智能体的档案。 */
+    public BotProfile getProfile() {
+        return profile;
     }
 
     private static String truncate(String s, int max) {

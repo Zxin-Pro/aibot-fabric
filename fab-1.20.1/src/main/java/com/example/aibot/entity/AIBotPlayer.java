@@ -60,6 +60,27 @@ public class AIBotPlayer extends ServerPlayer {
      * @param name   玩家名
      */
     public AIBotPlayer(MinecraftServer server, ServerLevel level, String name) {
+        this(server, level, name, name);
+    }
+
+    /**
+     * 构造假玩家（支持指定皮肤归属名）。
+     *
+     * <p><b>关于皮肤</b>：GameProfile 里带的是「名字」，
+     * 服务端在有皮肤缓存（正版验证过的服务器）时会按名字查皮肤，
+     * 因此填一个正版玩家名就能借用其外观。
+     * 纯离线服务器上没有皮肤服务，任何名字都是默认皮肤（Steve/Alex），
+     * 这是原版机制限制，不是模组的问题。</p>
+     *
+     * @param server    服务器实例
+     * @param level     目标世界
+     * @param name      玩家名（同时决定 UUID，必须唯一）
+     * @param skinOwner 皮肤归属名；为空则用 name
+     */
+    public AIBotPlayer(MinecraftServer server, ServerLevel level, String name, String skinOwner) {
+        // 1.20.1 的 GameProfile 只有 2 参数构造（uuid, name），
+        // 属性表（含皮肤 textures）要用 getProperties().put(...) 事后填。
+        // 这里不伪造 textures 签名 —— 那属于伪造正版身份，不做。
         super(server, level, new GameProfile(offlineUuid(name), name));
         // 先建 cookie，再用它构造伪造连接（两者必须是同一个对象）
         // 不走真实 socket 的连接对象（用全限定名避开同名嵌套类的遮蔽）
@@ -69,6 +90,18 @@ public class AIBotPlayer extends ServerPlayer {
                 server,
                 this.networkConnection,
                 this);
+    }
+
+    /**
+     * 组装 GameProfile 的属性表。
+     *
+     * <p>1.20.1 的构造是 2 参数，这个辅助方法保留给需要填属性表的版本线使用。</p>
+     */
+    @SuppressWarnings("unused")
+    private static com.mojang.authlib.properties.PropertyMap buildProperties(String name, String skinOwner) {
+        // 默认空属性表：离线模式下没有 textures 属性，
+        // 客户端会回退到默认皮肤。这里不做伪造签名（那属于伪造正版身份，不做）。
+        return new com.mojang.authlib.properties.PropertyMap();
     }
 
     

@@ -426,26 +426,77 @@ public class ActionExecutor {
         return ActionResult.started("开始拾取附近掉落物");
     }
 
-    /** 聊天。 */
+    /**
+     * 聊天。
+     *
+     * <p><b>为什么不用 broadcastSystemMessage</b>：那样发出来的是系统消息，
+     * 游戏里显示成黄色斜体，且<b>不带玩家名牌、不进聊天记录、其他插件也读不到</b>。
+     * 真人说话走的是聊天通道，所以这里用 {@code ChatType} 广播，
+     * 让它和真人发言在客户端呈现上完全一致。</p>
+     *
+     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：
+     * {@code PlayerList.broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)}
+     * 与 1.20.1 完全相同；{@code PlayerChatMessage.unsigned(UUID, String)} 与
+     * {@code ChatType.bind(ResourceKey, Entity)} 在 1.21.11 上也依然存在。
+     * 也就是说这一处两个模块可以逐字相同 —— 不要凭印象改动。</p>
+     */
     protected ActionResult chat(ActionParser.ParsedAction parsed) {
         String message = parsed.getString("message", "");
         if (message.trim().isEmpty()) {
             return ActionResult.fail("chat 动作缺少 message 参数");
         }
-        if (message.length() > 120) {
-            message = message.substring(0, 120) + "...";
+        String text = message.trim();
+        if (text.length() > 120) {
+            text = text.substring(0, 120) + "...";
         }
-        bot.serverLevel().getServer().getPlayerList()
-                .broadcastSystemMessage(
-                        net.minecraft.network.chat.Component.literal("<" + bot.getName().getString() + "> " + message),
-                        false);
-        return ActionResult.ok("说了: " + message);
+        try {
+            // 用原版聊天广播：与真人发言走同一条渲染路径
+            //（有玩家名牌、进聊天记录、其他插件能监听到 PlayerChatEvent）。
+            //
+            // 签名：broadcastChatMessage(PlayerChatMessage, ServerPlayer, ChatType.Bound)
+            // 其中用 unsigned 构造表示「未签名」——
+            // 这在离线/伪造连接下是正确做法（我们没有 Mojang 的会话密钥，
+            // 也不应该伪造正版签名）。
+            // ChatType.bind(key, entity) 内部会去 registry 查 ChatType 再绑定发送者，
+            // 这是最省事且语义正确的用法。
+            net.minecraft.network.chat.ChatType.Bound bound =
+                    net.minecraft.network.chat.ChatType.bind(
+                            net.minecraft.network.chat.ChatType.CHAT,
+                            bot);
+            net.minecraft.network.chat.PlayerChatMessage msg =
+                    net.minecraft.network.chat.PlayerChatMessage.unsigned(bot.getUUID(), text);
+            bot.serverLevel().getServer().getPlayerList()
+                    .broadcastChatMessage(msg, bot, bound);
+            return ActionResult.ok("说了: " + text);
+        } catch (Throwable t) {
+            // 少数版本签名不同，退回到直接发玩家消息（仍是玩家身份，不是系统广播）
+            bot.sendSystemMessage(net.minecraft.network.chat.Component.literal(text));
+            return ActionResult.ok("说了: " + text);
+        }
     }
 
-    /** 环顾四周。 */
+    /**
+     * 环顾四周：像真人一样平滑转动视角，而不是瞬间归零。
+     *
+     * <p>原来的实现直接把 yaw/pitch 设为 0 —— 那会在一 tick 内把头猛转 180 度，
+     * 真人的鼠标不可能这样。这里改为在当前朝向附近做小幅随机扫视。</p>
+     *
+     * <p><b>1.21.11 版本差异（已用 javap 核对）</b>：
+     * {@code ServerGamePacketListenerImpl.teleport(double, double, double, float, float)}
+     * 在 1.21.11 上依然存在，因此 {@code bot.connection.teleport(...)} 可用。</p>
+     */
     protected ActionResult look(ActionParser.ParsedAction parsed) {
-        bot.setYRot(0.0F);
-        bot.setXRot(0.0F);
+        float curYaw = bot.getYRot();
+        float curPitch = bot.getXRot();
+        // 在 ±60 度范围内扫视，俯仰限制在合理区间
+        float newYaw = curYaw + (float) ((Math.random() - 0.5) * 120.0);
+        float newPitch = curPitch + (float) ((Math.random() - 0.5) * 40.0);
+        newPitch = Math.max(-60.0f, Math.min(60.0f, newPitch));
+        bot.setYRot(newYaw % 360.0f);
+        bot.setXRot(newPitch);
+        // 同步给客户端，否则其他玩家看到的是旧朝向
+        bot.connection.teleport(bot.getX(), bot.getY(), bot.getZ(),
+                bot.getYRot(), bot.getXRot());
         return ActionResult.ok("环顾四周完成");
     }
 

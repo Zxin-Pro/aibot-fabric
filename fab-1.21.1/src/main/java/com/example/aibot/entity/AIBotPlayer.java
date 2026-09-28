@@ -65,6 +65,29 @@ public class AIBotPlayer extends ServerPlayer {
      * @param name   玩家名
      */
     public AIBotPlayer(MinecraftServer server, ServerLevel level, String name) {
+        this(server, level, name, name);
+    }
+
+    /**
+     * 构造假玩家（支持指定皮肤归属名）。
+     *
+     * <p><b>关于皮肤</b>：GameProfile 里带的是「名字」，
+     * 服务端在有皮肤缓存（正版验证过的服务器）时会按名字查皮肤，
+     * 因此填一个正版玩家名就能借用其外观。
+     * 纯离线服务器上没有皮肤服务，任何名字都是默认皮肤（Steve/Alex），
+     * 这是原版机制限制，不是模组的问题。</p>
+     *
+     * <p><b>1.21.11 版本差异</b>：{@code ServerPlayer} 构造是 <b>4 参数</b>
+     * （{@code MinecraftServer, ServerLevel, GameProfile, ClientInformation}），
+     * 比 1.20.1 多一个客户端信息；且 GameProfile 这里仍然是 2 参数构造，
+     * 属性表（含皮肤 textures）不做伪造签名 —— 那属于伪造正版身份，不做。</p>
+     *
+     * @param server    服务器实例
+     * @param level     目标世界
+     * @param name      玩家名（同时决定 UUID，必须唯一）
+     * @param skinOwner 皮肤归属名；当前仅作展示/档案用途，不伪造 textures
+     */
+    public AIBotPlayer(MinecraftServer server, ServerLevel level, String name, String skinOwner) {
         super(server, level, new GameProfile(offlineUuid(name), name), ClientInformation.createDefault());
         // 先建 cookie，再用它构造伪造连接（两者必须是同一个对象）
         this.cookie = CommonListenerCookie.createInitial(this.getGameProfile(), false);

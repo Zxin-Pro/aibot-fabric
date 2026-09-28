@@ -101,14 +101,29 @@ public final class ConfigStore {
         if (c.decisionIntervalTicks < 1) {
             c.decisionIntervalTicks = 40;
         }
-        if (c.maxStepsPerSession < 1) {
-            c.maxStepsPerSession = 200;
-        }
+        // 注意：maxStepsPerSession 允许为 0 或负数，表示【无上限】。
+        // 这里绝不能把 <=0 改成正数 —— 那会让「一直玩下去」的承诺静默失效，
+        // 跑满 200 步就自己停了。这是曾经真实存在过的 bug。
         if (c.stepTimeoutTicks < 1) {
             c.stepTimeoutTicks = 200;
         }
         if (c.botName == null || c.botName.trim().isEmpty()) {
             c.botName = "AIBot";
+        }
+        if (c.maxBots < 1) {
+            c.maxBots = 5;
+        }
+        if (c.contextWindow < 4) {
+            c.contextWindow = 12;
+        }
+        if (c.contextTokenBudget < 200) {
+            c.contextTokenBudget = 1500;
+        }
+        if (c.respawnDelayTicks < 0) {
+            c.respawnDelayTicks = 100;
+        }
+        if (c.stuckThreshold < 1) {
+            c.stuckThreshold = 3;
         }
     }
 

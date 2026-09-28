@@ -71,9 +71,45 @@ public final class LongTermMemory {
 
     private final Path memoryFile;
 
+    /**
+     * 单智能体记忆（默认文件名 memory.json，兼容旧版本存档）。
+     */
     public LongTermMemory(Path gameDir) {
+        this(gameDir, "default");
+    }
+
+    /**
+     * 按智能体名字隔离的记忆文件。
+     *
+     * <p>多智能体场景下，每个 bot 必须有独立的记忆文件，
+     * 否则 A 的经验会污染 B 的判断，而且两个线程会互相覆盖写盘。</p>
+     *
+     * <p>名字会做文件名净化（去掉路径分隔符等非法字符），
+     * 防止恶意名字造成目录穿越。</p>
+     *
+     * @param gameDir 存档根目录
+     * @param botName 智能体名字
+     */
+    public LongTermMemory(Path gameDir, String botName) {
         Path dir = gameDir.resolve("config").resolve("aibot");
-        this.memoryFile = dir.resolve("memory.json");
+        if (botName == null || botName.trim().isEmpty() || "default".equals(botName)) {
+            this.memoryFile = dir.resolve("memory.json");
+        } else {
+            this.memoryFile = dir.resolve("memory-" + sanitize(botName) + ".json");
+        }
+    }
+
+    /** 文件名净化：只保留字母数字下划线和短横线。 */
+    private static String sanitize(String name) {
+        StringBuilder sb = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+                    || c >= '0' && c <= '9' || c == '_' || c == '-') {
+                sb.append(c);
+            }
+        }
+        return sb.length() == 0 ? "bot" : sb.toString();
     }
 
     /** 从磁盘加载（不存在则视为空记忆）。 */
@@ -221,9 +257,18 @@ public final class LongTermMemory {
     // 计划持久化：让服务器重启后能接着做未完成的事
     // ------------------------------------------------------------------
 
-    /** 计划存档文件（与 memory.json 同目录）。 */
+    /**
+     * 计划存档文件（与 memory.json 同目录，按 bot 隔离）。
+     *
+     * <p>由 memory 文件名派生，因此多智能体各自有独立的计划存档，
+     * 不会互相覆盖。</p>
+     */
     private Path planFile() {
-        return this.memoryFile.resolveSibling("plan.json");
+        String n = this.memoryFile.getFileName().toString();
+        String planName = n.endsWith(".json")
+                ? n.substring(0, n.length() - ".json".length()) + "-plan.json"
+                : n + "-plan.json";
+        return this.memoryFile.resolveSibling(planName);
     }
 
     /**
@@ -236,7 +281,7 @@ public final class LongTermMemory {
             Files.createDirectories(this.memoryFile.getParent());
             PlanFile pf = new PlanFile();
             pf.tasks = plan.exportTasks();
-            Path tmp = planFile().resolveSibling("plan.json.tmp");
+            Path tmp = planFile().resolveSibling(planFile().getFileName() + ".tmp");
             Files.write(tmp, GSON.toJson(pf).getBytes(StandardCharsets.UTF_8));
             try {
                 Files.move(tmp, planFile(),
