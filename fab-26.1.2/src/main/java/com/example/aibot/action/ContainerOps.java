@@ -5,7 +5,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.AbstractFurnaceMenu;
-import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.InventoryMenu;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
@@ -86,11 +86,11 @@ public final class ContainerOps {
      * @param type   点击类型（PICKUP / QUICK_MOVE / SWAP / THROW ...）
      */
     public static void click(ServerPlayer player, AbstractContainerMenu menu,
-                             int slot, int button, ClickType type) {
+                             int slot, int button, ContainerInput type) {
         try {
             // 记录点击前的各槽位内容，作为「变更集」上报（原版协议要求）
             // 1.21.8+ 的包构造：(containerId, stateId, slot, button,
-            //                   ClickType, changedSlots<HashedStack>, HashedStack)
+            //                   ContainerInput, changedSlots<HashedStack>, HashedStack)
             it.unimi.dsi.fastutil.ints.Int2ObjectMap<net.minecraft.network.HashedStack> changed =
                     new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>();
             var packet = new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(
@@ -127,23 +127,23 @@ public final class ContainerOps {
 
     /** 左键点一下槽位（拿整摞 / 放下）。 */
     public static void leftClick(ServerPlayer player, AbstractContainerMenu menu, int slot) {
-        click(player, menu, slot, 0, ClickType.PICKUP);
+        click(player, menu, slot, 0, ContainerInput.PICKUP);
     }
 
     /** 右键点一下槽位（拿一个 / 放一个 / 对半分）。 */
     public static void rightClick(ServerPlayer player, AbstractContainerMenu menu, int slot) {
-        click(player, menu, slot, 1, ClickType.PICKUP);
+        click(player, menu, slot, 1, ContainerInput.PICKUP);
     }
 
     /** Shift + 点击（原版 QUICK_MOVE）：在容器与背包之间整摞搬运。 */
     public static void quickMove(ServerPlayer player, AbstractContainerMenu menu, int slot) {
-        click(player, menu, slot, 0, ClickType.QUICK_MOVE);
+        click(player, menu, slot, 0, ContainerInput.QUICK_MOVE);
     }
 
     /** 把光标上拿着的东西丢到界面外（清理光标，避免后续点击错位）。 */
     public static void dropCarried(ServerPlayer player, AbstractContainerMenu menu) {
         if (!menu.getCarried().isEmpty()) {
-            click(player, menu, SLOT_OUTSIDE, 0, ClickType.PICKUP);
+            click(player, menu, SLOT_OUTSIDE, 0, ContainerInput.PICKUP);
         }
     }
 
@@ -220,7 +220,7 @@ public final class ContainerOps {
             }
             // 背包满了：丢到地上（与真人表现一致）
             while (!menu.getCarried().isEmpty()) {
-                click(player, menu, SLOT_OUTSIDE, 0, ClickType.PICKUP);
+                click(player, menu, SLOT_OUTSIDE, 0, ContainerInput.PICKUP);
             }
         } catch (Throwable t) {
             LOGGER.log(Level.WARNING, "[AIBot] 清理光标物品失败", t);

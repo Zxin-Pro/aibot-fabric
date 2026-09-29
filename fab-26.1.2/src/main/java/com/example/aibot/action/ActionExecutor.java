@@ -466,7 +466,7 @@ public class ActionExecutor {
     /** 睡觉：需要夜晚且有床（走原版 startSleepInBed）。 */
     protected ActionResult sleep(ActionParser.ParsedAction parsed) {
         ServerLevel level = (ServerLevel) bot.level();
-        long dayTime = level.getDayTime() % 24000L;
+        long dayTime = level.getOverworldClockTime() % 24000L;
         if (dayTime < 13000L) {
             return ActionResult.fail("现在是白天，无法睡觉");
         }
@@ -498,7 +498,7 @@ public class ActionExecutor {
         try {
             var result = bot.startSleepInBed(bedPos);
             if (result.left().isPresent()) {
-                return ActionResult.fail("无法入睡：" + result.left().get().name());
+                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {

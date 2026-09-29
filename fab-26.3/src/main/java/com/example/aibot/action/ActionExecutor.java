@@ -466,7 +466,7 @@ public class ActionExecutor {
     /** 睡觉：需要夜晚且有床（走原版 startSleepInBed）。 */
     protected ActionResult sleep(ActionParser.ParsedAction parsed) {
         ServerLevel level = (ServerLevel) bot.level();
-        long dayTime = level.getDayTime() % 24000L;
+        long dayTime = level.getOverworldClockTime() % 24000L;
         if (dayTime < 13000L) {
             return ActionResult.fail("现在是白天，无法睡觉");
         }
@@ -496,9 +496,13 @@ public class ActionExecutor {
         }
 
         try {
-            var result = bot.startSleepInBed(bedPos);
+            // 26.3 的 startSleepInBed 需要 (床方块, 床状态, BedRule, 坐标)
+            net.minecraft.world.level.block.state.BlockState bedState = level.getBlockState(bedPos);
+            var bedBlock = (net.minecraft.world.level.block.AbstractBedBlock) bedState.getBlock();
+            net.minecraft.world.attribute.BedRule rule = bedBlock.getBedRule(level, bedPos);
+            var result = bot.startSleepInBed(bedBlock, bedState, rule, bedPos);
             if (result.left().isPresent()) {
-                return ActionResult.fail("无法入睡：" + result.left().get().name());
+                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {
