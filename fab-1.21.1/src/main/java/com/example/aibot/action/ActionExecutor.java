@@ -49,8 +49,12 @@ public class ActionExecutor {
     /** 逐 tick 动作驱动器。 */
     protected final TickActionDriver driver;
 
+    /** 全局配置（GUI 动作层需要）。 */
+    protected final AIConfig config;
+
     public ActionExecutor(ServerPlayer bot, AIConfig config) {
         this.bot = bot;
+        this.config = config;
         this.driver = new TickActionDriver(bot, config);
     }
 
