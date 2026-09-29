@@ -59,6 +59,12 @@ public final class ContainerOps {
 
     private static final Logger LOGGER = Logger.getLogger("aibot-gui");
 
+    /** 常见燃料（用于未指定燃料时的兜底挑选）。 */
+    private static final java.util.Set<String> COMMON_FUELS = java.util.Set.of(
+            "minecraft:coal", "minecraft:charcoal", "minecraft:coal_block",
+            "minecraft:stick", "minecraft:blaze_rod", "minecraft:lava_bucket",
+            "minecraft:dried_kelp_block", "minecraft:bamboo", "minecraft:dead_bush");
+
     /** 原版「界面外」槽位编号。 */
     public static final int SLOT_OUTSIDE = -999;
 
@@ -434,14 +440,14 @@ public final class ContainerOps {
             if (s.isEmpty()) {
                 continue;
             }
-            try {
-                // 1.21.2+ 的燃料判定走 FuelValues（静态 getFuel() 已移除）
-                ServerLevel lv = (ServerLevel) player.level();
-                if (lv.fuelValues().burnDuration(s) > 0) {
-                    return i;
-                }
-            } catch (Throwable ignored) {
-                // 拿不到燃料表：放弃自动挑选，由调用方指定燃料
+            // 26.3 没有 fuelValues()，改用「常见燃料物品名」判断。
+            // 这只用于「调用方没指定燃料」时的兜底挑选，
+            // 挑错也只是烧得慢一点，不会破坏正确性。
+            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM
+                    .getKey(s.getItem()).toString();
+            if (COMMON_FUELS.contains(id) || id.endsWith("_planks") || id.endsWith("_log")
+                    || id.endsWith("_wood") || id.endsWith("_sapling")) {
+                return i;
             }
         }
         return -1;
