@@ -1,109 +1,23 @@
 # version-matrix.yml
 #
-# AIBot 全版本覆盖矩阵。
+# AIBot 版本覆盖矩阵。
 #
-# 说明：Minecraft 的 API 在版本间反复大改，无法用一份源码编译所有版本。
-# 因此按「API 断代」划分，每个断代一个源码目录，用 fabric.mod.json 的
-# depends.minecraft 声明它覆盖的版本区间。
+# 背景：Minecraft 的 API 在版本之间反复大改，无法用一份源码编译所有版本。
+# 因此按「API 断代」划分，每个断代一个源码目录，一个 jar 覆盖一段连续版本。
 #
-# 命名规则：fab-<断代代表版本>，代表版本选取该断代内 API 最完整的一个。
+# status:
+#   ready    —— 已实现且 CI 构建通过
+#   pending  —— 骨架已建但未适配
+#   planned  —— 尚未开始
 #
-# 字段：
-#   id          目录名
-#   minecraft   编译用的 MC 版本（该断代的代表版本）
-#   covers      该 jar 实际兼容的 MC 版本区间（写进 fabric.mod.json）
-#   java        编译目标 Java 版本
-#   loader      Fabric Loader 版本
-#   fabricApi   编译用的 fabric-api 版本
-#   loom        Loom 版本
-#   note        该断代的关键 API 特征（写代码时要对齐的点）
-#   status      ready | pending | unsupported
+# 本矩阵由 .github/workflows/build.yml 读取，status=ready 的条目会进入构建矩阵。
 
 generations:
 
-  # ============ 1.14 ~ 1.14.4 ============
-  - id: fab-1.14.4
-    minecraft: "1.14.4"
-    covers: ">=1.14 <1.15"
-    java: 8
-    loader: "0.14.24"
-    fabricApi: "0.28.5+1.14"
-    loom: "0.2.7"
-    gradle: "6.9.4"
-    note: >
-      Yarn 命名时代。Entity/PlayerEntity/ServerPlayerEntity 皆带 Entity 后缀。
-      无 Registry 静态访问，需用 Registry.BLOCK.get(Identifier)。
-    status: pending
+  # ==================================================================
+  # 已实现并通过 CI（8 条线，覆盖 1.20 ~ 26.3）
+  # ==================================================================
 
-  # ============ 1.15 ~ 1.15.2 ============
-  - id: fab-1.15.2
-    minecraft: "1.15.2"
-    covers: ">=1.15 <1.16"
-    java: 8
-    loader: "0.14.24"
-    fabricApi: "0.28.5+1.15"
-    loom: "0.2.7"
-    gradle: "6.9.4"
-    note: "与 1.14 断代基本一致，主要差异在方块/实体接口微调。"
-    status: pending
-
-  # ============ 1.16 ~ 1.16.5 ============
-  - id: fab-1.16.5
-    minecraft: "1.16.5"
-    covers: ">=1.16 <1.16.5"
-    java: 8
-    loader: "0.14.24"
-    fabricApi: "0.42.0+1.16"
-    loom: "0.10.6"
-    gradle: "7.4.2"
-    note: >
-      Registry 仍在重构。Identifier 构造仍为 new Identifier(ns, path)。
-      命令注册仍是 CommandRegistrationCallback 早期版本。
-    status: pending
-
-  # ============ 1.17 ~ 1.18.1 ============
-  - id: fab-1.18.1
-    minecraft: "1.18.1"
-    covers: ">=1.17 <1.18.2"
-    java: 17
-    loader: "0.14.24"
-    fabricApi: "0.46.6+1.18"
-    loom: "0.12.12"
-    gradle: "7.6"
-    note: >
-      Java 17 基线。ServerPlayerEntity 仍需 Entity 后缀。
-      CommandRegistrationCallback 变为 v2。
-    status: pending
-
-  # ============ 1.18.2 ~ 1.19.2 ============
-  - id: fab-1.19.2
-    minecraft: "1.19.2"
-    covers: ">=1.18.2 <1.19.3"
-    java: 17
-    loader: "0.14.24"
-    fabricApi: "0.77.0+1.19.2"
-    loom: "1.0.34"
-    gradle: "7.6"
-    note: >
-      ServerPlayNetworking 签名变化。聊天事件用 ServerMessageEvents.CHAT_MESSAGE。
-      仍需 ServerPlayerEntity。
-    status: pending
-
-  # ============ 1.19.3 ~ 1.19.4 ============
-  - id: fab-1.19.4
-    minecraft: "1.19.4"
-    covers: ">=1.19.3 <1.20"
-    java: 17
-    loader: "0.14.24"
-    fabricApi: "0.87.2+1.19.4"
-    loom: "1.1.25"
-    gradle: "7.6.4"
-    note: >
-      关键断代：Entity 后缀大剥离（ServerPlayerEntity -> ServerPlayer）。
-      命令 API 改用 CommandSourceStack。
-    status: pending
-
-  # ============ 1.20 ~ 1.20.1 (已是现成的) ============
   - id: fab-1.20.1
     minecraft: "1.20.1"
     covers: ">=1.20 <1.20.2"
@@ -111,11 +25,13 @@ generations:
     loader: "0.19.3"
     fabricApi: "0.92.12+1.20.1"
     loom: "1.17.19"
-    gradle: "9.5.1"
-    note: "现有版本线，本项目已实现。"
+    loomPlugin: "fabric-loom-remap"
+    note: >
+      旧 API 体系：ServerPlayer 3 参数构造、placeNewPlayer 2 参数（无 cookie）、
+      getServerDirectory() 返回 File、BuiltInRegistries.get() 返回实体、
+      isSolidRender(BlockGetter, BlockPos)、Inventory.selected 是公开字段。
     status: ready
 
-  # ============ 1.20.2 ~ 1.20.6 ============
   - id: fab-1.20.6
     minecraft: "1.20.6"
     covers: ">=1.20.2 <1.21"
@@ -123,14 +39,13 @@ generations:
     loader: "0.19.3"
     fabricApi: "0.100.8+1.20.6"
     loom: "1.17.19"
-    gradle: "9.5.1"
+    loomPlugin: "fabric-loom-remap"
     note: >
-      关键断代：组件化（Component / ItemStack 的 Data Components）、
-      CustomPacketPayload 引入、Registry 用 BuiltInRegistries。
-      Java 21 基线。
+      组件化起点。与 1.20.1 主要差异：placeNewPlayer 已是 3 参数（带 cookie）、
+      ServerPlayer 已是 4 参数构造；但 respawn 仍是 2 参数、
+      getServerDirectory() 仍返回 File。
     status: ready
 
-  # ============ 1.21 ~ 1.21.1 (已是现成的) ============
   - id: fab-1.21.1
     minecraft: "1.21.1"
     covers: ">=1.21 <1.21.2"
@@ -138,11 +53,12 @@ generations:
     loader: "0.19.3"
     fabricApi: "0.116.17+1.21.1"
     loom: "1.17.19"
-    gradle: "9.5.1"
-    note: "现有版本线，本项目已实现并完成本版改造。"
+    loomPlugin: "fabric-loom-remap"
+    note: >
+      与 1.20.6 同体系，差异：getServerDirectory() 返回 Path、
+      respawn 已是 3 参数（带 RemovalReason）。
     status: ready
 
-  # ============ 1.21.2 ~ 1.21.4 ============
   - id: fab-1.21.4
     minecraft: "1.21.4"
     covers: ">=1.21.2 <1.21.5"
@@ -150,11 +66,17 @@ generations:
     loader: "0.19.3"
     fabricApi: "0.119.4+1.21.4"
     loom: "1.17.19"
-    gradle: "9.5.1"
-    note: "移动/输入 API 调整。"
+    loomPlugin: "fabric-loom-remap"
+    note: >
+      【新架构 + 旧命名的过渡期】新架构：Registry.getValue()、
+      RecipeDisplay 体系、isSolidRender() 无参。
+      旧命名：ResourceLocation（非 Identifier）、
+      Inventory.getSelected()/setSelectedHotbarSlot()、
+      CommandSourceStack.hasPermission(int)、ResourceKey.location()、
+      getSharedSpawnPos()、ServerPlayer.level() 尚未协变（需强转）、
+      BedSleepingProblem 无 message()。
     status: ready
 
-  # ============ 1.21.5 ~ 1.21.8 ============
   - id: fab-1.21.8
     minecraft: "1.21.8"
     covers: ">=1.21.5 <1.21.9"
@@ -162,11 +84,14 @@ generations:
     loader: "0.19.3"
     fabricApi: "0.136.1+1.21.8"
     loom: "1.17.19"
-    gradle: "9.5.1"
-    note: "输入与实体接口继续调整。"
+    loomPlugin: "fabric-loom-remap"
+    note: >
+      与 1.21.4 的差异：ServerPlayer.level() 已协变（返回 ServerLevel，
+      可直接赋值给 ServerLevel 变量）；其余（ResourceLocation、
+      hasPermission(int)、getSharedSpawnPos、BedSleepingProblem 无 message）
+      与 1.21.4 相同。
     status: ready
 
-  # ============ 1.21.9 ~ 1.21.11 (1.21.11 已是现成的) ============
   - id: fab-1.21.11
     minecraft: "1.21.11"
     covers: ">=1.21.9 <26.1"
@@ -174,42 +99,118 @@ generations:
     loader: "0.19.3"
     fabricApi: "0.141.6+1.21.11"
     loom: "1.17.19"
-    gradle: "9.5.1"
-    note: "现有版本线，本项目已实现。"
+    loomPlugin: "fabric-loom-remap"
+    note: >
+      【新命名体系】ResourceLocation 改名 Identifier、
+      CommandSourceStack 改用 permissions().hasPermission(Permissions.XXX)、
+      getRespawnData().pos()、BedSleepingProblem 有 message()。
     status: ready
 
-  # ============ 26.1 ~ 26.1.2 ============
   - id: fab-26.1.2
     minecraft: "26.1.2"
     covers: ">=26.1 <26.2"
-    java: 21
+    java: 25
     loader: "0.19.3"
     fabricApi: "0.155.3+26.1.2"
-    loom: "1.17.19"
-    gradle: "9.5.1"
-    note: "新版本号体系起点。"
+    loom: "1.17.21"
+    loomPlugin: "fabric-loom"
+    note: >
+      【26.x 线路】Minecraft 不再混淆，因此不声明 mappings
+      （写 loom.officialMojangMappings() 会因 Mojang 不再发布
+      client_mappings 而配置失败）。
+      与 1.21.11 的差异：swing 仍 2 参数、类名仍是 BedBlock（非 AbstractBedBlock）、
+      startSleepInBed(pos) 单参数（无 BedRule）、drop 无 Prediction 参数。
+      编译目标 Java 25（该类文件已是 v69）。
     status: ready
 
-  # ============ 26.2 ============
-  - id: fab-26.2
-    minecraft: "26.2"
-    covers: ">=26.2 <26.3"
-    java: 25
-    loader: "0.19.5"
-    fabricApi: "0.161.0+26.2"
-    loom: "1.17.21"
-    gradle: "9.5.1"
-    note: "Java 25 基线。"
-    status: pending
-
-  # ============ 26.3 (已是现成的) ============
   - id: fab-26.3
     minecraft: "26.3"
-    covers: ">=26.3 <26.4"
+    covers: ">=26.2 <26.4"
     java: 25
     loader: "0.19.5"
     fabricApi: "0.161.0+26.3"
     loom: "1.17.21"
-    gradle: "9.5.1"
-    note: "现有版本线，本项目已实现。"
+    loomPlugin: "fabric-loom"
+    note: >
+      与 26.1.2 的差异：swing 3 参数（带 SwingAnimation）、
+      AbstractBedBlock（BedBlock 重命名）、startSleepInBed 4 参数（带 BedRule）、
+      drop 带 Prediction 参数。
     status: ready
+
+  # ==================================================================
+  # 尚未实现（计划中）—— 这些断代需要从零编写源码
+  # ==================================================================
+  #
+  # 说明：下面这些断代的 API 与上面 8 条差距很大（Yarn 命名时代、
+  # 命令 API 大改等），不能靠改几行适配，需要单独实现。
+  # 每个断代的适配要点已写好，接手时按 note 里的提示做。
+  #
+  # 优先级建议（按用户数量从多到少）：
+  #   1.21.5 ~ 1.21.7 （已由 1.21.8 线覆盖，无需单独做）
+  #   1.19.4 / 1.19.2 / 1.18.1 / 1.16.5 / 1.14.4  ← 老版本，用户基数小但仍有
+  #
+  # 注意：1.20 ~ 26.3 已全覆盖，若只服务主流服务器，当前 8 条线已够用。
+
+  - id: fab-1.19.4
+    minecraft: "1.19.4"
+    covers: ">=1.19.3 <1.20"
+    java: 17
+    loader: "0.14.24"
+    fabricApi: "0.87.2+1.19.4"
+    loom: "1.1.25"
+    loomPlugin: "fabric-loom"
+    note: >
+      【关键断代】Entity 后缀大剥离：ServerPlayerEntity -> ServerPlayer。
+      命令 API 改用 CommandSourceStack。
+      需要把现有代码的类名整体替换，并核对命令注册方式。
+    status: pending
+
+  - id: fab-1.19.2
+    minecraft: "1.19.2"
+    covers: ">=1.18.2 <1.19.3"
+    java: 17
+    loader: "0.14.24"
+    fabricApi: "0.77.0+1.19.2"
+    loom: "1.0.34"
+    loomPlugin: "fabric-loom"
+    note: >
+      仍是 ServerPlayerEntity 时代。聊天事件签名与新版不同。
+      需要逐文件适配类名与方法签名。
+    status: pending
+
+  - id: fab-1.18.1
+    minecraft: "1.18.1"
+    covers: ">=1.17 <1.18.2"
+    java: 17
+    loader: "0.14.24"
+    fabricApi: "0.46.6+1.18"
+    loom: "0.12.12"
+    loomPlugin: "fabric-loom"
+    note: "Java 17 基线起点。ServerPlayerEntity 时代，命令注册用 v2 callback。"
+    status: pending
+
+  - id: fab-1.16.5
+    minecraft: "1.16.5"
+    covers: ">=1.16.5 <1.17"
+    java: 8
+    loader: "0.14.24"
+    fabricApi: "0.42.0+1.16"
+    loom: "0.10.6"
+    loomPlugin: "fabric-loom"
+    note: >
+      Java 8 时代。Identifier 构造需 new Identifier(ns, path)，
+      Registry 访问方式完全不同。需要重写感知与动作模块。
+    status: pending
+
+  - id: fab-1.14.4
+    minecraft: "1.14.4"
+    covers: ">=1.14 <1.16"
+    java: 8
+    loader: "0.14.24"
+    fabricApi: "0.28.5+1.14"
+    loom: "0.2.7"
+    loomPlugin: "fabric-loom"
+    note: >
+      最早的 Fabric 时代。API 与现在差异极大，
+      建议作为独立项目处理，不建议与现有代码共享。
+    status: pending
