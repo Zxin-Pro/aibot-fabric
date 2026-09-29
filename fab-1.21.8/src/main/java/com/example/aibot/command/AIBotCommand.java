@@ -235,7 +235,9 @@ public final class AIBotCommand {
 
         MultiBotManager.Agent agent = bots.spawn(server, profile);
         if (agent == null) {
-            return fail(ctx, "生成智能体失败，请查看服务器日志（可能是名字冲突或区块未加载）");
+            String why = bots.getLastError();
+            return fail(ctx, "生成智能体失败："
+                    + (why == null ? "未知原因（请查看服务器日志）" : why));
         }
 
         if (isNew) {

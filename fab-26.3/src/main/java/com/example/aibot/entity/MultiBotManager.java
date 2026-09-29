@@ -43,6 +43,7 @@ import java.util.logging.Logger;
  *   <li>生成位置：26.x 没有 {@code getSharedSpawnPos()}，改用
  *       {@code overworld.getRespawnData().pos()} —— 这与本模块原
  *       {@code FakePlayerManager} 的做法完全一致，是 26.x 的正确写法。</li>
+ stage = "③ 注册进玩家列表（placeNewPlayer）";
  *   <li>入服：{@code PlayerList.placeNewPlayer(Connection, ServerPlayer, CommonListenerCookie)}
  *       是 3 参数，必须把 cookie 一起传进去。</li>
  *   <li>重生：{@code PlayerList.respawn(ServerPlayer, boolean, RemovalReason)}
@@ -103,6 +104,13 @@ public final class MultiBotManager {
     private final LLMClient llmClient;
     private final java.nio.file.Path gameDir;
 
+    /** 最近一次 spawn 失败的真实原因（供命令层显示给玩家，便于自助排查）。 */
+    private volatile String lastError = null;
+
+    public String getLastError() {
+        return lastError;
+    }
+
     public MultiBotManager(AIConfig config, CacheStats cacheStats, LLMClient llmClient,
                            java.nio.file.Path gameDir) {
         this.config = config;
@@ -139,18 +147,22 @@ public final class MultiBotManager {
         String nameError = profile.validateName();
         if (nameError != null) {
             LOGGER.warning("[AIBot] 非法名字 " + name + "：" + nameError);
+            lastError = "名字不合法：" + nameError;
             return null;
         }
 
+        String stage = "准备";
         try {
             ServerLevel overworld = server.overworld();
             // 26.3：GameProfile(uuid, name) 仍是 2 参数构造，属性表（含皮肤 textures）
             // 用 getProperties().put(...) 事后填。这里不伪造 textures 签名 ——
             // 那属于伪造正版身份，不做。
+            stage = "① 创建玩家实体";
             AIBotPlayer bot = new AIBotPlayer(server, overworld, name, profile.resolvedSkinOwner());
 
             // 生成位置：自定义坐标优先，否则用世界重生点。
             // 26.3 用 getRespawnData().pos()（旧版本是 getSharedSpawnPos()）。
+            stage = "② 设置生成坐标";
             if (profile.spawnAtWorldSpawn) {
                 var spawnPos = overworld.getRespawnData().pos();
                 bot.setPos(spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5);
@@ -168,6 +180,7 @@ public final class MultiBotManager {
                     bot.getNetworkConnection(), bot, bot.createCookie());
 
             // 每个智能体一套独立记忆，按名字分文件，互不干扰
+            stage = "④ 加载记忆文件";
             LongTermMemory ltm = new LongTermMemory(gameDir, name);
             LandmarkMemory lm = new LandmarkMemory(gameDir, name);
             ltm.load();
@@ -177,6 +190,7 @@ public final class MultiBotManager {
             // 因此可以各自设置目标、各自卡住重规划。
             // 短期记忆必须是同一个实例：Agent 持有它用于展示与压缩，
             // AutoLoop 用它记录每一步 —— 两份会导致状态展示永远是空的。
+            stage = "⑤ 创建决策循环";
             Agent agent = new Agent(profile, ltm, lm, null);
             AutoLoop loop = new AutoLoop(config, cacheStats, llmClient, this,
                     agent.shortTermMemory, ltm, lm, profile, agent.chatMemory);
@@ -198,6 +212,7 @@ public final class MultiBotManager {
             //  - 档案里已标记 autoLoop 的（老档案/服务器重启恢复）→ 开始
             //  - 配置开启 autoStartOnSpawn（默认开）→ 新生成的也开始
             // 这样玩家 spawn 完就不用管了。
+            stage = "⑥ 启动自主循环";
             boolean shouldStart = profile.autoLoop || config.autoStartOnSpawn;
             if (shouldStart) {
                 loop.start();
@@ -211,7 +226,10 @@ public final class MultiBotManager {
             return agent;
 
         } catch (Throwable t) {
-            LOGGER.log(Level.SEVERE, "[AIBot] 生成智能体 " + name + " 失败", t);
+            lastError = stage + " 失败 → " + t.getClass().getSimpleName()
+                    + (t.getMessage() == null ? "（无消息）" : "：" + t.getMessage());
+            LOGGER.log(Level.SEVERE, "[AIBot] 生成智能体 " + name
+                    + " 失败于 [" + stage + "]", t);
             return null;
         }
     }
