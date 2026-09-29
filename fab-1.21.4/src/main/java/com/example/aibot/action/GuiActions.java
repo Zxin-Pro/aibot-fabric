@@ -581,10 +581,14 @@ public final class GuiActions {
                 continue;
             }
             if (fallback == null) {
-                fallback = (RecipeHolder<? extends CraftingRecipe>) holder;
+                @SuppressWarnings({"unchecked","rawtypes"})
+                RecipeHolder<? extends CraftingRecipe> cast = (RecipeHolder) holder;
+                fallback = cast;
             }
             if (materialsAvailable(cr)) {
-                return (RecipeHolder<? extends CraftingRecipe>) holder;
+                @SuppressWarnings({"unchecked","rawtypes"})
+                RecipeHolder<? extends CraftingRecipe> cast2 = (RecipeHolder) holder;
+                return cast2;
             }
         }
         return fallback;
@@ -664,7 +668,15 @@ public final class GuiActions {
         }
     }
 
-    /** 解析配方的产物（1.21.2+ 走 SlotDisplay）。 */
+    /**
+     * 解析配方的产物。
+     *
+     * <p>1.21.2+ 的产物由 {@code SlotDisplay} 描述，但 resolve 系列方法
+     * 在各小版本签名不同（1.21.4/1.21.8 用的是带 DisplayContentsFactory 的
+     * {@code resolve(...)}，1.21.9+ 才是 resolveForStacks）。
+     * 这里用<b>反射</b>兼容两种，保证跨版本可用 —— 产物解析失败不影响
+     * 「按材料摆格子」的主流程，只是无法预判产物名称。</p>
+     */
     private static ItemStack resultOf(CraftingRecipe recipe,
                                       net.minecraft.util.context.ContextMap ctx) {
         try {
@@ -672,10 +684,28 @@ public final class GuiActions {
             if (displays.isEmpty()) {
                 return ItemStack.EMPTY;
             }
-            // 取第一个 display 的第一个物品作为成品
-            // （1.21.2+ 没有 resolveForFirstStack，用 resolveForStacks 取首项）
-            var stacks = displays.get(0).resolveForStacks(ctx);
-            return stacks.isEmpty() ? ItemStack.EMPTY : stacks.get(0);
+            Object first = displays.get(0);
+            // 尝试 resolveForStacks（1.21.9+）
+            try {
+                var m = first.getClass().getMethod("resolveForStacks",
+                        net.minecraft.util.context.ContextMap.class);
+                Object r = m.invoke(first, ctx);
+                if (r instanceof java.util.List<?> l && !l.isEmpty()) {
+                    return (ItemStack) l.get(0);
+                }
+            } catch (NoSuchMethodException ignored) {
+            }
+            // 尝试 resolveForFirstStack（部分版本）
+            try {
+                var m = first.getClass().getMethod("resolveForFirstStack",
+                        net.minecraft.util.context.ContextMap.class);
+                Object r = m.invoke(first, ctx);
+                if (r instanceof ItemStack st) {
+                    return st;
+                }
+            } catch (NoSuchMethodException ignored) {
+            }
+            return ItemStack.EMPTY;
         } catch (Throwable t) {
             return ItemStack.EMPTY;
         }

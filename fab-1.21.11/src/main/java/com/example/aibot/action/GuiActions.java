@@ -579,10 +579,14 @@ public final class GuiActions {
                 continue;
             }
             if (fallback == null) {
-                fallback = (RecipeHolder<? extends CraftingRecipe>) holder;
+                @SuppressWarnings({"unchecked","rawtypes"})
+                RecipeHolder<? extends CraftingRecipe> cast = (RecipeHolder) holder;
+                fallback = cast;
             }
             if (materialsAvailable(cr)) {
-                return (RecipeHolder<? extends CraftingRecipe>) holder;
+                @SuppressWarnings({"unchecked","rawtypes"})
+                RecipeHolder<? extends CraftingRecipe> cast2 = (RecipeHolder) holder;
+                return cast2;
             }
         }
         return fallback;

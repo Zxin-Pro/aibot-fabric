@@ -355,6 +355,16 @@ public class ActionExecutor {
         }
         return guiRef;
     }
+    /**
+     * 存物品进箱子 —— <b>走原版箱子界面</b>，与真人一致。
+     *
+     * <p>真人操作：走到箱子旁 → 右键打开 → shift 点击要存的物品 → 关界面。</p>
+     */
+    protected ActionResult store(ActionParser.ParsedAction parsed) {
+        String want = parsed.getString("item", "");
+        return gui().store(want);
+    }
+
     protected ActionResult attack(ActionParser.ParsedAction parsed) {
         String target = parsed.getString("target", "");
         driver.beginAttack(target);
