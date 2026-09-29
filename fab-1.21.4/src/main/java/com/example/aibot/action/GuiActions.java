@@ -521,7 +521,7 @@ public final class GuiActions {
             if (key == null) {
                 return null;
             }
-            return BuiltInRegistries.ITEM.get(key);
+            return BuiltInRegistries.ITEM.getValue(key);
         } catch (Throwable t) {
             return null;
         }

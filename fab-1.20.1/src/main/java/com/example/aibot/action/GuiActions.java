@@ -14,7 +14,6 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.crafting.CraftingRecipe;
-import net.minecraft.world.item.crafting.RecipeHolder;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 
@@ -106,12 +105,12 @@ public final class GuiActions {
 
         // 1) 找配方（含「是否需要工作台」的信息）
         ServerLevel level = (ServerLevel) bot.level();
-        RecipeHolder<? extends CraftingRecipe> recipe = findCraftingRecipe(level, target);
+        CraftingRecipe recipe = findCraftingRecipe(level, target);
         if (recipe == null) {
             return ActionExecutor.ActionResult.fail("找不到合成 " + ContainerOps.shortId(full) + " 的配方");
         }
 
-        boolean needsTable = requiresTable(recipe.value());
+        boolean needsTable = requiresTable(recipe);
 
         // 2) 不需要工作台的 2x2 配方：直接用背包自带界面合成（真人也是这么做的）
         if (!needsTable) {
@@ -160,7 +159,7 @@ public final class GuiActions {
         }
 
         try {
-            int made = craftInMenu(menu, recipe.value(), count, 1, 9);  // 工作台：0=成品，1..9=3x3
+            int made = craftInMenu(menu, recipe, count, 1, 9);  // 工作台：0=成品，1..9=3x3
             if (made < 0) {
                 return ActionExecutor.ActionResult.fail("材料不足，无法合成 " + ContainerOps.shortId(full));
             }
@@ -177,12 +176,12 @@ public final class GuiActions {
      * <p>真人做这类合成时也不会去放工作台，直接开背包界面就行。
      * 这里用 {@code inventoryMenu}（就是那个 2x2 格子），走同样的点击序列。</p>
      */
-    private ActionExecutor.ActionResult craftInInventory(RecipeHolder<? extends CraftingRecipe> recipe,
+    private ActionExecutor.ActionResult craftInInventory(CraftingRecipe recipe,
                                                          int count, String full) {
         AbstractContainerMenu menu = bot.inventoryMenu;
         try {
             // inventoryMenu 的合成格同样是 «0 号是成品，1-4 是 2x2 网格» 的布局
-            int made = craftInMenu(menu, recipe.value(), count,
+            int made = craftInMenu(menu, recipe, count,
                     net.minecraft.world.inventory.InventoryMenu.CRAFT_SLOT_START, 4);
             if (made < 0) {
                 return ActionExecutor.ActionResult.fail("材料不足，无法合成 " + ContainerOps.shortId(full));
@@ -565,11 +564,11 @@ public final class GuiActions {
      * <p>优先返回「当前材料够做」的那个；若都不够，返回任意一个
      * （用于给出「材料不足」的准确提示）。</p>
      */
-    private RecipeHolder<? extends CraftingRecipe> findCraftingRecipe(ServerLevel level, Item target) {
+    private CraftingRecipe findCraftingRecipe(ServerLevel level, Item target) {
         var rm = level.getServer().getRecipeManager();
-        RecipeHolder<? extends CraftingRecipe> fallback = null;
-        for (RecipeHolder<?> holder : rm.getRecipes()) {
-            if (!(holder.value() instanceof CraftingRecipe cr)) {
+        CraftingRecipe fallback = null;
+        for (net.minecraft.world.item.crafting.Recipe<?> holder : rm.getRecipes()) {
+            if (!(holder instanceof CraftingRecipe cr)) {
                 continue;
             }
             ItemStack result;
@@ -582,10 +581,10 @@ public final class GuiActions {
                 continue;
             }
             if (fallback == null) {
-                fallback = (RecipeHolder<? extends CraftingRecipe>) holder;
+                fallback = (CraftingRecipe) holder;
             }
             if (materialsAvailable(cr)) {
-                return (RecipeHolder<? extends CraftingRecipe>) holder;
+                return (CraftingRecipe) holder;
             }
         }
         return fallback;

@@ -186,7 +186,7 @@ public class ActionExecutor {
     /** 逃离威胁：朝远离威胁的方向走。 */
     protected ActionResult flee(ActionParser.ParsedAction parsed) {
         double distance = parsed.getDouble("distance", 16.0);
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = (ServerLevel) bot.level();
 
         AABB box = bot.getBoundingBox().inflate(16.0);
         List<Entity> threats = level.getEntities(bot, box, e -> e instanceof Monster && e.isAlive());
@@ -234,7 +234,7 @@ public class ActionExecutor {
             return ActionResult.fail("未知方块: " + blockId);
         }
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = (ServerLevel) bot.level();
         BlockPos pos = findNearestBlock(level, target, 24);
         if (pos == null) {
             return ActionResult.fail("附近 24 格内找不到 " + shortId(blockId));
@@ -268,7 +268,7 @@ public class ActionExecutor {
         int dz = parsed.getInt("z", 0);
         BlockPos pos = base.offset(dx, dy, dz);
 
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = (ServerLevel) bot.level();
         if (!level.isLoaded(pos)) {
             return ActionResult.fail("目标位置所在区块未加载");
         }
@@ -489,7 +489,7 @@ public class ActionExecutor {
                             bot);
             net.minecraft.network.chat.PlayerChatMessage msg =
                     net.minecraft.network.chat.PlayerChatMessage.unsigned(bot.getUUID(), text);
-            bot.serverLevel().getServer().getPlayerList()
+            ((ServerLevel) bot.level()).getServer().getPlayerList()
                     .broadcastChatMessage(msg, bot, bound);
             return ActionResult.ok("说了: " + text);
         } catch (Throwable t) {
@@ -526,7 +526,7 @@ public class ActionExecutor {
 
     /** 睡觉：需要夜晚且有床（走原版 startSleepInBed）。 */
     protected ActionResult sleep(ActionParser.ParsedAction parsed) {
-        ServerLevel level = bot.serverLevel();
+        ServerLevel level = (ServerLevel) bot.level();
         long dayTime = level.getDayTime() % 24000L;
         if (dayTime < 13000L) {
             return ActionResult.fail("现在是白天，无法睡觉");
@@ -573,7 +573,7 @@ public class ActionExecutor {
         if (playerName.isEmpty()) {
             return ActionResult.fail("follow 动作缺少 player 参数");
         }
-        for (var p : bot.serverLevel().players()) {
+        for (var p : ((ServerLevel) bot.level()).players()) {
             if (p.getName().getString().equalsIgnoreCase(playerName)) {
                 double dist = p.distanceTo(bot);
                 driver.beginWalk(p.position(), (int) Math.max(200, dist / 0.215 * 3));
@@ -653,7 +653,7 @@ public class ActionExecutor {
         if (key == null) {
             return null;
         }
-        Block b = BuiltInRegistries.BLOCK.get(key);
+        Block b = BuiltInRegistries.BLOCK.getValue(key);
         return b == null || b == Blocks.AIR ? null : b;
     }
 
