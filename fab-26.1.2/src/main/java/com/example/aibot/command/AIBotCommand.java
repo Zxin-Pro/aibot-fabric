@@ -93,9 +93,7 @@ public final class AIBotCommand {
                          CommandBuildContext buildContext,
                          Commands.CommandSelection selection) {
         dispatcher.register(Commands.literal("aibot")
-                // 需要 OP 权限。
-                // 注意 1.21.11+/26.x 的 API 变更：旧的 src.hasPermission(2) 已移除，
-                // 现在通过 permissions().hasPermission(Permission) 判断。
+                // 1.21.11+/26.x：旧的 hasPermission(int) 已移除
                 .requires(src -> src.permissions()
                         .hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_MODERATOR))
 
@@ -175,7 +173,12 @@ public final class AIBotCommand {
                                 .then(Commands.argument("json", StringArgumentType.greedyString())
                                         .executes(this::doManualAction))))
 
-                // ---- prompt（查看静态前缀信息） ----
+                // ---- selftest（GUI 操作自检，实机验证用） ----
+                .then(Commands.literal("selftest")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(this::doSelfTest)))
+
+                // ---- prompt ----
                 .then(Commands.literal("prompt")
                         .executes(this::doPromptInfo))
 
@@ -628,6 +631,151 @@ public final class AIBotCommand {
     }
 
     /** 展示静态前缀信息，帮助用户确认缓存基础是否健康。 */
+    /**
+     * GUI 操作自检：实机验证「原版界面操作」这条链路是否可用。
+     *
+     * <p><b>为什么需要它</b>：GUI 操作涉及槽位映射，编译期查不出错误。
+     * 这个命令会让智能体当场做一遍完整流程，把每一步的结果报给你看：</p>
+     * <ol>
+     *   <li>检查背包物品（工具、材料）</li>
+     *   <li>打开背包界面并移动物品（验证 doClick 链路）</li>
+     *   <li>报告附近的工作台/箱子/熔炉</li>
+     * </ol>
+     *
+     * <p>建议实机测试流程：先 <code>/aibot selftest 名字</code> 看链路是否通，
+     * 再给它木头让它 <code>/aibot do 名字 {"action":"craft","item":"oak_planks"}</code>，
+     * 观察是否真的在背包界面里合成了木板。</p>
+     */
+    private int doSelfTest(CommandContext<CommandSourceStack> ctx) {
+        String name = StringArgumentType.getString(ctx, "name");
+        MultiBotManager.Agent a = bots.get(name);
+        if (a == null) {
+            return fail(ctx, "找不到智能体: " + name);
+        }
+        ServerPlayer bot = a.player();
+        if (bot == null) {
+            return fail(ctx, name + " 没有有效实体");
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("===== GUI 操作自检：").append(name).append(" =====\n\n");
+
+        // ---- 1) 基本状态 ----
+        sb.append("[1] 实体状态\n");
+        sb.append("    位置: ").append(bot.blockPosition().toShortString()).append("\n");
+        sb.append("    存活: ").append(bot.isAlive()).append("\n");
+        sb.append("    当前界面: ")
+                .append(bot.containerMenu == bot.inventoryMenu ? "背包（默认）" : "已打开容器")
+                .append("\n");
+
+        // ---- 2) 背包扫描 ----
+        sb.append("\n[2] 背包物品（验证能否枚举）\n");
+        int totalKinds = 0;
+        int totalItems = 0;
+        StringBuilder tools = new StringBuilder();
+        StringBuilder foods = new StringBuilder();
+        var inv = bot.getInventory();
+        for (int i = 0; i < inv.getContainerSize(); i++) {
+            var st = inv.getItem(i);
+            if (st.isEmpty()) {
+                continue;
+            }
+            totalKinds++;
+            totalItems += st.getCount();
+            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM
+                    .getKey(st.getItem()).toString();
+            String shortName = id.startsWith("minecraft:")
+                    ? id.substring("minecraft:".length()) : id;
+            if (shortName.endsWith("_pickaxe") || shortName.endsWith("_axe")
+                    || shortName.endsWith("_shovel") || shortName.endsWith("_sword")) {
+                tools.append(shortName).append("(x").append(st.getCount()).append(") ");
+            }
+            if (shortName.contains("bread") || shortName.contains("apple")
+                    || shortName.contains("beef") || shortName.contains("pork")
+                    || shortName.contains("chicken") || shortName.contains("carrot")
+                    || shortName.contains("potato")) {
+                foods.append(shortName).append("(x").append(st.getCount()).append(") ");
+            }
+        }
+        sb.append("    物品种类: ").append(totalKinds).append("，总计 ").append(totalItems).append(" 个\n");
+        sb.append("    工具: ").append(tools.length() == 0 ? "(无)" : tools.toString()).append("\n");
+        sb.append("    食物: ").append(foods.length() == 0 ? "(无)" : foods.toString()).append("\n");
+
+        // ---- 3) 背包界面操作测试（GUI 链路核心） ----
+        sb.append("\n[3] 背包界面操作测试（验证原版点击链路）\n");
+        try {
+            var menu = bot.inventoryMenu;
+            sb.append("    界面槽位数: ").append(menu.slots.size()).append("（应 ≥ 45）\n");
+            sb.append("    容器 id: ").append(menu.containerId).append("\n");
+            sb.append("    stateId: ").append(menu.getStateId()).append("\n");
+            // 找两个物品槽位，尝试一次原版点击（拿起再放下，位置不变）
+            int firstItem = -1;
+            for (int i = 0; i < menu.slots.size(); i++) {
+                if (menu.getSlot(i).hasItem()) {
+                    firstItem = i;
+                    break;
+                }
+            }
+            if (firstItem >= 0) {
+                var before = menu.getSlot(firstItem).getItem().copy();
+                com.example.aibot.action.ContainerOps.leftClick(bot, menu, firstItem);
+                boolean picked = !menu.getCarried().isEmpty();
+                com.example.aibot.action.ContainerOps.leftClick(bot, menu, firstItem);
+                boolean putBack = menu.getCarried().isEmpty();
+                var after = menu.getSlot(firstItem).getItem();
+                sb.append("    测试槽位: ").append(firstItem).append("\n");
+                sb.append("    拿起: ").append(picked ? "成功" : "失败").append("\n");
+                sb.append("    放回: ").append(putBack ? "成功" : "失败").append("\n");
+                sb.append("    物品未变: ")
+                        .append(before.getItem() == after.getItem()
+                                && before.getCount() == after.getCount() ? "是" : "否（异常！）")
+                        .append("\n");
+                if (picked && putBack) {
+                    sb.append("    ✅ GUI 点击链路正常\n");
+                } else {
+                    sb.append("    ❌ GUI 点击链路异常，请把这段输出反馈给开发者\n");
+                }
+            } else {
+                sb.append("    (背包是空的，跳过点击测试)\n");
+            }
+        } catch (Throwable t) {
+            sb.append("    ❌ 异常: ").append(t.getClass().getSimpleName())
+                    .append(" - ").append(t.getMessage()).append("\n");
+        }
+
+        // ---- 4) 附近可交互方块 ----
+        sb.append("\n[4] 附近可交互方块（8 格内）\n");
+        try {
+            var level = (net.minecraft.server.level.ServerLevel) bot.level();
+            var pos = bot.blockPosition();
+            var table = com.example.aibot.action.ContainerOps
+                    .findNearbyCraftingTable(level, pos, 8);
+            var chest = com.example.aibot.action.ContainerOps
+                    .findNearbyContainer(level, pos, 8);
+            var furnace = com.example.aibot.action.ContainerOps
+                    .findNearbyFurnace(level, pos, 8);
+            sb.append("    工作台: ").append(table == null ? "(无)" : table.toShortString()).append("\n");
+            sb.append("    箱子: ").append(chest == null ? "(无)" : chest.toShortString()).append("\n");
+            sb.append("    熔炉: ").append(furnace == null ? "(无)" : furnace.toShortString()).append("\n");
+        } catch (Throwable t) {
+            sb.append("    ❌ 扫描异常: ").append(t.getMessage()).append("\n");
+        }
+
+        // ---- 5) 建议的下一步 ----
+        sb.append("\n[5] 建议的完整验证流程\n");
+        sb.append("    a) 给木头: /give ").append(name).append(" minecraft:oak_log 4\n");
+        sb.append("    b) 试合成: /aibot do ").append(name)
+                .append(" {\"action\":\"craft\",\"item\":\"minecraft:oak_planks\"}\n");
+        sb.append("       预期：背包里出现木板（走的是背包 2x2 界面）\n");
+        sb.append("    c) 再合成工作台（需要 4 木板，2x2 可行）\n");
+        sb.append("    d) 放下工作台后，再合成需要 3x3 的东西（如木镐）\n");
+        sb.append("       预期：它会走到工作台旁 → 右键打开 → 摆材料 → 取出成品\n");
+        sb.append("    e) 全程可用 /aibot status ").append(name).append(" 观察进度\n");
+
+        send(ctx, sb.toString());
+        return 1;
+    }
+
     private int doPromptInfo(CommandContext<CommandSourceStack> ctx) {
         StringBuilder sb = new StringBuilder("===== 提示词结构 =====\n");
         sb.append("请求由 4 条消息组成，按「变化频率」从低到高排列：\n");
