@@ -228,7 +228,7 @@ public final class GuiActions {
      */
     private int craftInMenu(AbstractContainerMenu menu, CraftingRecipe recipe,
                             int count, int gridStart, int gridSize) {
-        List<net.minecraft.world.item.crafting.Ingredient> ingredients = recipe.getIngredients();
+        List<net.minecraft.world.item.crafting.Ingredient> ingredients = ingredientsOf(recipe);
         // 原版 getIngredients() 返回的是「按 3x3 顺序」的列表；
         // 对于 2x2 配方，非零元素集中在左上角，截取前 gridSize 个即可。
         int limit = Math.min(ingredients.size(), gridSize);
@@ -567,17 +567,14 @@ public final class GuiActions {
      */
     private RecipeHolder<? extends CraftingRecipe> findCraftingRecipe(ServerLevel level, Item target) {
         var rm = level.getServer().getRecipeManager();
+        // 1.21.2+：产物由 SlotDisplay 描述，用 resolveForFirstStack 解析
+        var ctx = net.minecraft.world.item.crafting.display.SlotDisplayContext.fromLevel(level);
         RecipeHolder<? extends CraftingRecipe> fallback = null;
         for (RecipeHolder<?> holder : rm.getRecipes()) {
             if (!(holder.value() instanceof CraftingRecipe cr)) {
                 continue;
             }
-            ItemStack result;
-            try {
-                result = cr.getResultItem(level.registryAccess());
-            } catch (Throwable t) {
-                continue;
-            }
+            ItemStack result = resultOf(cr, ctx);
             if (result.isEmpty() || !result.is(target)) {
                 continue;
             }
@@ -593,7 +590,7 @@ public final class GuiActions {
 
     /** 判断配方所需材料背包里是否齐全（只算一级，前置合成由 craft 递归处理）。 */
     private boolean materialsAvailable(CraftingRecipe recipe) {
-        for (var ing : recipe.getIngredients()) {
+        for (var ing : ingredientsOf(recipe)) {
             if (ing == null || ing.isEmpty()) {
                 continue;
             }
@@ -634,7 +631,7 @@ public final class GuiActions {
             }
             if (recipe instanceof net.minecraft.world.item.crafting.ShapelessRecipe) {
                 int kinds = 0;
-                for (var ing : recipe.getIngredients()) {
+                for (var ing : ingredientsOf(recipe)) {
                     if (ing != null && !ing.isEmpty()) {
                         kinds++;
                     }
@@ -647,4 +644,31 @@ public final class GuiActions {
         }
         return true;
     }
+
+    /** 取配方所需材料（1.21.2+ 的 getIngredients 只在有序配方上）。 */
+    private static List<net.minecraft.world.item.crafting.Ingredient> ingredientsOf(CraftingRecipe recipe) {
+        try {
+            if (recipe instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
+                return shaped.getIngredients();
+            }
+            return java.util.Collections.emptyList();
+        } catch (Throwable t) {
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    /** 解析配方的产物（1.21.2+ 走 SlotDisplay）。 */
+    private static ItemStack resultOf(CraftingRecipe recipe,
+                                      net.minecraft.util.context.ContextMap ctx) {
+        try {
+            var displays = recipe.display();
+            if (displays.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            return displays.get(0).resolveForFirstStack(ctx);
+        } catch (Throwable t) {
+            return ItemStack.EMPTY;
+        }
+    }
+
 }
