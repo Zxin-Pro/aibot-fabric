@@ -653,7 +653,8 @@ public final class GuiActions {
             if (recipe instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
                 List<net.minecraft.world.item.crafting.Ingredient> out = new java.util.ArrayList<>();
                 for (var opt : shaped.getIngredients()) {
-                    out.add(opt.orElse(net.minecraft.world.item.crafting.Ingredient.EMPTY));
+                    // 空 Optional 表示该格不放东西；用 null 占位，调用方已判 null
+                    out.add(opt.orElse(null));
                 }
                 return out;
             }
@@ -671,8 +672,10 @@ public final class GuiActions {
             if (displays.isEmpty()) {
                 return ItemStack.EMPTY;
             }
-            // 第一个 display 通常是成品
-            return displays.get(0).resolveForFirstStack(ctx);
+            // 取第一个 display 的第一个物品作为成品
+            // （1.21.2+ 没有 resolveForFirstStack，用 resolveForStacks 取首项）
+            var stacks = displays.get(0).resolveForStacks(ctx);
+            return stacks.isEmpty() ? ItemStack.EMPTY : stacks.get(0);
         } catch (Throwable t) {
             return ItemStack.EMPTY;
         }

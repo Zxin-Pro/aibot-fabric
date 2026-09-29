@@ -652,7 +652,8 @@ public final class GuiActions {
             if (recipe instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
                 List<net.minecraft.world.item.crafting.Ingredient> out = new java.util.ArrayList<>();
                 for (var opt : shaped.getIngredients()) {
-                    out.add(opt.orElse(net.minecraft.world.item.crafting.Ingredient.EMPTY));
+                    // 空 Optional 表示该格不放东西；用 null 占位，调用方已判 null
+                    out.add(opt.orElse(null));
                 }
                 return out;
             }

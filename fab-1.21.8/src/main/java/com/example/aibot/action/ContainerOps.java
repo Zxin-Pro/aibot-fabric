@@ -100,7 +100,9 @@ public final class ContainerOps {
                     (byte) button,
                     type,
                     changed,
-                    net.minecraft.network.HashedStack.fromItemStack(menu.getCarried()));
+                    // 服务端会自行维护真实的光标状态，这里传 EMPTY 即可
+                    // （HashedStack.create 需要 HashGenerator，构造繁琐且无必要）
+                    net.minecraft.network.HashedStack.EMPTY);
 
             // 投递给服务端处理 —— 与真人客户端发来的包走同一个方法
             var listener = player.connection;
@@ -435,7 +437,7 @@ public final class ContainerOps {
             try {
                 // 1.21.2+ 的燃料判定走 FuelValues（静态 getFuel() 已移除）
                 ServerLevel lv = (ServerLevel) player.level();
-                if (lv.fuelValues().getBurnDuration(s) > 0) {
+                if (lv.fuelValues().burnDuration(s) > 0) {
                     return i;
                 }
             } catch (Throwable ignored) {

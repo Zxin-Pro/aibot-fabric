@@ -669,8 +669,10 @@ public final class GuiActions {
             if (displays.isEmpty()) {
                 return ItemStack.EMPTY;
             }
-            // 第一个 display 通常是成品
-            return displays.get(0).resolveForFirstStack(ctx);
+            // 取第一个 display 的第一个物品作为成品
+            // （1.21.2+ 没有 resolveForFirstStack，用 resolveForStacks 取首项）
+            var stacks = displays.get(0).resolveForStacks(ctx);
+            return stacks.isEmpty() ? ItemStack.EMPTY : stacks.get(0);
         } catch (Throwable t) {
             return ItemStack.EMPTY;
         }

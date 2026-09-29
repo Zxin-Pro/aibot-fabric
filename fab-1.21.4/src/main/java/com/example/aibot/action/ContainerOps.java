@@ -440,7 +440,7 @@ public final class ContainerOps {
             try {
                 // 1.21.2+ 的燃料判定走 FuelValues（静态 getFuel() 已移除）
                 ServerLevel lv = (ServerLevel) player.level();
-                if (lv.fuelValues().getBurnDuration(s) > 0) {
+                if (lv.fuelValues().burnDuration(s) > 0) {
                     return i;
                 }
             } catch (Throwable ignored) {
