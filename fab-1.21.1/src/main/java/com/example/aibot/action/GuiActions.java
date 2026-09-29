@@ -160,7 +160,7 @@ public final class GuiActions {
         }
 
         try {
-            int made = ContainerOps.craftWithTable(bot, menu, recipe, count);
+            int made = craftInMenu(menu, recipe.value(), count, 1, 9);  // 工作台：0=成品，1..9=3x3
             if (made < 0) {
                 return ActionExecutor.ActionResult.fail("材料不足，无法合成 " + ContainerOps.shortId(full));
             }

@@ -888,10 +888,11 @@ public final class TickActionDriver {
                 return false;
             }
 
-            // 真人拖拽 = 左键拿起 → 左键放下（或右键逐个放）
-            menu.doClick(menuFrom, 0, net.minecraft.world.inventory.ClickType.PICKUP, bot);
-            menu.doClick(menuTo, 0, net.minecraft.world.inventory.ClickType.PICKUP, bot);
-            menu.broadcastChanges();
+            // 真人拖拽 = 左键拿起 → 左键放下
+            // 走 ContainerOps：它投递的是原版点击数据包，
+            // 与真人客户端操作完全同一条路径（doClick 是 private 不能直接调）。
+            ContainerOps.leftClick(bot, menu, menuFrom);
+            ContainerOps.leftClick(bot, menu, menuTo);
 
             // 正常情况下光标物品已交换过去、目标格有东西了
             return !menu.getSlot(menuTo).getItem().isEmpty();

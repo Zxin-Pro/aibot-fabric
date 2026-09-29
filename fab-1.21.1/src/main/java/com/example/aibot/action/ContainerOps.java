@@ -438,13 +438,14 @@ public final class ContainerOps {
                 continue;
             }
             try {
-                // 原版燃料判定：1.21.2+ 用 FuelValues；旧版是静态 Fuel 表
-                ServerLevel level = (ServerLevel) player.level();
-                if (level.fuelValues().getBurnDuration(s) > 0) {
+                // 原版燃料判定（1.21.1 用静态燃料表 getFuel()）
+                Integer burn = net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity
+                        .getFuel().get(s.getItem());
+                if (burn != null && burn > 0) {
                     return i;
                 }
             } catch (Throwable ignored) {
-                // 拿不到燃料表：放弃自动挑选
+                // 拿不到燃料表：放弃自动挑选，由调用方指定燃料
             }
         }
         return -1;

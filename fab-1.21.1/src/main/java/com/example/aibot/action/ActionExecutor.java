@@ -356,6 +356,20 @@ public class ActionExecutor {
         return guiRef;
     }
 
+    /**
+     * 存物品进箱子 —— <b>走原版箱子界面</b>，与真人一致。
+     *
+     * <p>真人操作：走到箱子旁 → 右键打开 → shift 点击要存的物品 → 关界面。
+     * 本方法用完全相同的序列（通过 {@link ContainerOps} 投递原版点击包）。</p>
+     *
+     * <p>注意会跳过快捷栏前 9 格，避免把手上正在用的工具也存走 ——
+     * 这一点真人也一样（不会把镐子存进箱子然后忘了拿）。</p>
+     */
+    protected ActionResult store(ActionParser.ParsedAction parsed) {
+        String want = parsed.getString("item", "");
+        return gui().store(want);
+    }
+
     protected boolean hasIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
             var ingredients = recipe.getIngredients();
