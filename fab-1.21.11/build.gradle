@@ -4,7 +4,10 @@ plugins {
 }
 
 group = "com.example.aibot"
-version = "0.5.0"
+// 版本号从 gradle.properties 的 version 读取。
+// 注意：不要在两处各写一份（历史上 build.gradle 硬编码 0.5.0
+// 覆盖了 gradle.properties 的 0.6.0，导致产出的 jar 版本号不对）。
+version = providers.gradleProperty("version").getOrElse("0.6.0")
 
 dependencies {
     minecraft "com.mojang:minecraft:1.21.11"
