@@ -336,7 +336,7 @@ public class ActionExecutor {
             ItemStack out = matchedResult.copy();
             out.setCount(batch);
             if (!bot.getInventory().add(out)) {
-                bot.drop(out, false, net.minecraft.util.Prediction.SERVER_ONLY);
+                bot.drop(out, false);
             }
             total -= batch;
         }
@@ -532,12 +532,12 @@ public class ActionExecutor {
             bedPos = BlockPos.containing(parsed.getDouble("x", 0),
                     parsed.getDouble("y", 0), parsed.getDouble("z", 0));
             if (!(level.getBlockState(bedPos).getBlock()
-                    instanceof net.minecraft.world.level.block.AbstractBedBlock)) {
+                    instanceof net.minecraft.world.level.block.BedBlock)) {
                 bedPos = null;
             }
         }
         if (bedPos == null) {
-            bedPos = findNearestBlockOfType(level, net.minecraft.world.level.block.AbstractBedBlock.class, 24);
+            bedPos = findNearestBlockOfType(level, net.minecraft.world.level.block.BedBlock.class, 24);
             if (bedPos == null) {
                 return ActionResult.fail("附近 24 格内找不到床");
             }
@@ -552,12 +552,9 @@ public class ActionExecutor {
         }
 
         try {
-            // 26.3 的 startSleepInBed 需要 (床方块, 床状态, BedRule, 坐标)
-            net.minecraft.world.level.block.state.BlockState bedState = level.getBlockState(bedPos);
-            var bedBlock = (net.minecraft.world.level.block.AbstractBedBlock) bedState.getBlock();
-            net.minecraft.world.attribute.BedRule rule = bedBlock.getBedRule(level, bedPos);
-
-            var result = bot.startSleepInBed(bedBlock, bedState, rule, bedPos);
+            // 26.1.2 的 startSleepInBed 只需坐标
+            // （26.3 才改成 (床方块, 床状态, BedRule, 坐标) 四参数）
+            var result = bot.startSleepInBed(bedPos);
             if (result.left().isPresent()) {
                 return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
             }

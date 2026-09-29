@@ -509,7 +509,7 @@ public final class TickActionDriver {
 
         clearMovementInput();
         lookAtBlock(target);
-        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
+        bot.swing(InteractionHand.MAIN_HAND, true);
 
         // 走原版挖掘流程（会按硬度耗时）
         bot.gameMode.handleBlockBreakAction(
@@ -579,7 +579,7 @@ public final class TickActionDriver {
         BlockHitResult hit = new BlockHitResult(hitVec, face, against, false);
         ItemStack held = bot.getInventory().getSelectedItem();
         bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
-        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
+        bot.swing(InteractionHand.MAIN_HAND, true);
 
         // 下一 tick 用实际方块状态判定是否成功
         if (!level.getBlockState(target).isAir() && !level.getBlockState(target).canBeReplaced()) {
@@ -859,7 +859,7 @@ public final class TickActionDriver {
 
         // 面朝方块（真人挖矿也会看着它）
         lookAtBlock(mineTarget);
-        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
+        bot.swing(InteractionHand.MAIN_HAND, true);
 
         // 原版挖掘：第一次发 START，之后每 tick 发 STOP 继续累积进度
         // 这正是真人客户端持续按住左键时做的事情。
@@ -990,7 +990,7 @@ public final class TickActionDriver {
         ItemStack held = bot.getInventory().getSelectedItem();
         // 原版放置入口：会做朝向、碰撞、可替换性等全部校验
         var result = bot.gameMode.useItemOn(bot, level, held, InteractionHand.MAIN_HAND, hit);
-        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
+        bot.swing(InteractionHand.MAIN_HAND, true);
 
         if (result.consumesAction() || level.getBlockState(placePos).is(placeBlock)) {
             // 成功与否下一 tick 用实际方块状态判定
@@ -1100,7 +1100,7 @@ public final class TickActionDriver {
 
         // 面朝目标
         lookAtBlock(victim.blockPosition());
-        bot.swing(InteractionHand.MAIN_HAND, net.minecraft.world.item.component.SwingAnimation.DEFAULT, true);
+        bot.swing(InteractionHand.MAIN_HAND, true);
 
         // 走原版攻击路径：会计算伤害、击退、暴击、冷却倍率
         bot.attack(victim);
