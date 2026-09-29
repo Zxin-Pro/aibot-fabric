@@ -374,123 +374,107 @@ networkTimeout=120000
 
 **https://github.com/Zxin-Pro/aibot-fabric/releases**
 
-| Minecraft | 下载文件 |
+| Minecraft 版本 | 下载文件 |
 |---|---|
-| 1.20.1 | `aibot-0.5.0-1.20.1.jar` |
-| 1.21.1 | `aibot-0.5.0-1.21.1.jar` |
-| 1.21.11 | `aibot-0.5.0-1.21.11.jar` |
-| 26.3 | `aibot-0.5.0-26.3.jar` |
+| 1.20 ~ 1.20.1 | `aibot-0.6.0-mc1.20.1.jar` |
+| 1.20.2 ~ 1.20.6 | `aibot-0.6.0-mc1.20.6.jar` |
+| 1.21 ~ 1.21.1 | `aibot-0.6.0-mc1.21.1.jar` |
+| 1.21.2 ~ 1.21.4 | `aibot-0.6.0-mc1.21.4.jar` |
+| 1.21.5 ~ 1.21.8 | `aibot-0.6.0-mc1.21.8.jar` |
+| 1.21.9 ~ 1.21.11 | `aibot-0.6.0-mc1.21.11.jar` |
+| 26.1 ~ 26.1.2 | `aibot-0.6.0-mc26.1.2.jar` |
+| 26.2 ~ 26.3 | `aibot-0.6.0-mc26.3.jar` |
+
+每个 jar 覆盖它所在的一整段版本区间，选与你服务器 MC 版本对应的那一个即可。
+（各版本区间由 `version-matrix.yml` 定义，详见第 0 节。）
 
 装法见第 3 节，配置见第 4 节。
 
 ---
 
-## 3. 打包（自己构建四个版本的 jar）
+## 3. 打包（自己构建 jar）
 
-### 方式一：一键脚本（推荐）
+### 方式一：GitHub Actions（推荐）
 
-`build-all.bat` 会依次构建四个版本。**先改脚本顶部的三个 JDK 路径**为你自己的实际路径：
+仓库已配好矩阵构建。改完代码推上去，或手动触发：
 
-```bat
-set "AIBOT_JDK17=C:\Users\zjh19\DSH\tools\jdk-17.0.20.1+1"
-set "AIBOT_JDK21=C:\Users\zjh19\DSH\tools\jdk-21.0.12.1+1"
-set "AIBOT_JDK25=C:\Users\zjh19\DSH\tools\jdk-25.0.4.1+1"
+```bash
+# 命令行（需 gh CLI）
+gh workflow run build.yml
+
+# 只构建指定模块
+gh workflow run build.yml -f only=fab-1.21.1
 ```
 
-然后运行：
+或在网页上点 **Actions → Build All Versions → Run workflow**。
+8 个版本并行构建，各约 1~2 分钟。
+
+**为什么推荐它**：Loom 1.17.x 要求用 JDK 21+ 启动 Gradle，
+而 26.x 线还要 JDK 25；本机同时装齐这些 JDK 比较麻烦。
+CI 会自动装好 JDK 17/21/25 并处理 toolchain 解析。
+
+### 方式二：本地一键脚本（Windows）
+
+`build-all.bat` 会依次构建全部版本。**先改脚本顶部的三个 JDK 路径**：
 
 ```bat
-cd aibot-fabric
-build-all.bat
+set "AIBOT_JDK17=C:\path\to\jdk-17"
+set "AIBOT_JDK21=C:\path\to\jdk-21"
+set "AIBOT_JDK25=C:\path\to\jdk-25"
 ```
 
-脚本会自动：读取版本号（不再写死）→ 逐个 `clean build` → 把四个 jar 复制到 `release\`
-并按 Minecraft 版本改名（`aibot-<版本>-<MC>.jar`），**直接就是可上传到 Releases 的文件**。
+然后 `build-all.bat`。脚本会自动读取版本号、逐个 `clean build`、
+把 jar 复制到 `release\` 并按 MC 版本改名。
 
-**可调环境变量**（在运行前 `set`）：
+**可调环境变量**：
 
 | 变量 | 默认 | 用途 |
 |---|---|---|
-| `SKIP_CLEAN` | `0` | 设为 `1` 跳过 `clean`，构建更快。**但见下方警告** |
-| `KEEP_DAEMON` | `1` | 设为 `0` 每个模块都 `--no-daemon`（更慢、更吃内存） |
-| `SETTLE_SECONDS` | `5` | 模块之间的等待秒数，让系统回收上一个 JVM 的内存 |
+| `SKIP_CLEAN` | `0` | 设为 `1` 跳过 `clean`（**见下方警告**） |
+| `KEEP_DAEMON` | `1` | 设为 `0` 每个模块都 `--no-daemon` |
+| `SETTLE_SECONDS` | `5` | 模块之间等待秒数，让系统回收上一个 JVM 内存 |
 | `AIBOT_GRADLE_HEAP` | `-Xmx1G` | Gradle JVM 堆大小 |
 
-> ⚠️ **关于 `clean`（这是实打实踩过的坑）**
+> ⚠️ **关于 `clean`（实打实踩过的坑）**
 >
 > `processResources` 会把 `fabric.mod.json` 里的 `${version}` 展开成真实版本号，
 > 而 Gradle 的增量资源缓存**不一定会察觉到版本号变了**。
-> 结果就是：产出的 jar **文件名是 0.5.0，但里面写的还是 0.4.0** ——
-> 游戏能正常加载，但版本号显示错误，非常难排查。
+> 结果：产出的 jar **文件名是 0.6.0，但里面写的还是 0.5.0** ——
+> 游戏能正常加载，但版本号显示错误，很难排查。
 >
-> 所以默认走 `clean build`。只有在你**确认版本号没改过**时，才用 `SKIP_CLEAN=1` 加速。
+> 所以默认走 `clean build`。只有确认版本号没改过时才用 `SKIP_CLEAN=1` 加速。
 
-> ⚠️ **关于内存（如果你遇到 `Gradle build daemon disappeared unexpectedly`）**
+> ⚠️ **关于内存（`Gradle build daemon disappeared unexpectedly`）**
 >
-> 每个模块的 `gradle.properties` 里写的是 `-Xmx2G`。**单个模块构建完全没问题，
-> 但连跑四个会失败**：Windows 会为每个 JVM 预先提交（commit）内存，
-> 等到第三个或第四个时提交额度就耗尽了，于是报
-> `insufficient memory for the Java Runtime Environment` 或
-> `daemon disappeared` —— 而此时任务管理器可能还显示好几个 GB "可用"
-> （**物理内存剩余 ≠ 提交额度剩余**，这是最容易误判的地方）。
+> 模块的 `gradle.properties` 写的是 `-Xmx2G`。单个模块没问题，
+> 但连跑多个会失败：Windows 会为每个 JVM 预先提交内存，
+> 跑到第三个或第四个时提交额度耗尽 —— 而此时任务管理器可能还显示几个 GB "可用"
+> （**物理内存剩余 ≠ 提交额度剩余**）。
 >
-> 脚本已经把堆降到 `-Xmx1G` 并复用同一个 daemon 来规避。
-> 如果你的机器内存很宽裕、想用回 2G，设 `set AIBOT_GRADLE_HEAP=-Xmx2G`；
-> 反过来如果还是失败，先关掉其他占用内存的程序，
-> 或者干脆一个一个模块构建（见下方「方式二」）。
+> 脚本已把堆降到 `-Xmx1G` 并复用同一个 daemon 规避。内存宽裕可设
+> `set AIBOT_GRADLE_HEAP=-Xmx2G`。
 
-### 方式二：手动逐版本构建
-
-**建议始终带 `clean`**（原因见上）。若内存紧张，一次只构建一个模块。
-
-**1.20.1（注意用 JDK 21 启动 Gradle）：**
+### 方式三：手动单版本构建
 
 ```bat
-set "JAVA_HOME=C:\path\to\jdk-21"
-cd fab-1.20.1
-gradlew.bat clean build --no-daemon
-```
-
-**1.21.1 / 1.21.11：**
-
-```bat
-set "JAVA_HOME=C:\path\to\jdk-21"
+set "JAVA_HOME=C:\path\to\jdk-21"        REM 26.x 线用 jdk-25
 cd fab-1.21.11
 gradlew.bat clean build --no-daemon
 ```
 
-**26.3（必须用 JDK 25）：**
-
-```bat
-set "JAVA_HOME=C:\path\to\jdk-25"
-cd fab-26.3
-gradlew.bat clean build --no-daemon
-```
-
-如果报 `insufficient memory`，加一个较小的堆：
-
-```bat
-gradlew.bat clean build --no-daemon -Dorg.gradle.jvmargs=-Xmx1G
-```
+内存不足时加：`-Dorg.gradle.jvmargs=-Xmx1G`
 
 > Linux / macOS 把 `gradlew.bat` 换成 `./gradlew`，`set` 换成 `export`。
 
 ### 产物位置
 
-`build-all.bat` 会把四个 jar 收集到：
-
-```
-release/aibot-<版本号>-1.20.1.jar
-release/aibot-<版本号>-1.21.1.jar
-release/aibot-<版本号>-1.21.11.jar
-release/aibot-<版本号>-26.3.jar    <- 这四个就是上传 Releases 用的
-```
-
-每个模块自己的原始产物（版本号以实际为准，当前为 `0.5.0`）：
-
 ```
 fab-<版本>/build/libs/aibot-<版本号>.jar           <- 装进 mods 的就是这个
 fab-<版本>/build/libs/aibot-<版本号>-sources.jar   <- 源码包，不用装
+```
+
+`build-all.bat` 会把它们收集到 `release/`（该目录不入库，jar 通过 Releases 分发）。
+
 ```
 
 **选对 jar**：给 1.20.1 用 `fab-1.20.1` 的产物，给 26.3 用 `fab-26.3` 的产物，不能混用。

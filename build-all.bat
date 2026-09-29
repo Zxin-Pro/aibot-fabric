@@ -105,9 +105,10 @@ mkdir "%OUTDIR%"
 REM First module warms the daemon; the rest reuse it.
 set "WARMED=0"
 
-for %%V in (fab-1.20.1 fab-1.21.1 fab-1.21.11) do (
+for %%V in (fab-1.20.1 fab-1.20.6 fab-1.21.1 fab-1.21.4 fab-1.21.8 fab-1.21.11) do (
   call :buildOne %%V jdk21 %AIBOT_JDK21%
 )
+call :buildOne fab-26.1.2 jdk25 %AIBOT_JDK25%
 call :buildOne fab-26.3 jdk25 %AIBOT_JDK25%
 
 echo.
@@ -115,7 +116,7 @@ echo ============================================================
 if "%FAILED%"=="1" (
   echo  RESULT: some versions FAILED. See the log above.
   echo.
-  echo  Built OK: %BUILT% of 4.  Any jar that did build is in:
+  echo  Built OK: %BUILT% of 8.  Any jar that did build is in:
   echo    %OUTDIR%
   echo.
   echo  If the failure was "insufficient memory" or "daemon disappeared",
