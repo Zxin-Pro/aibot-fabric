@@ -521,7 +521,7 @@ public final class GuiActions {
             if (key == null) {
                 return null;
             }
-            return BuiltInRegistries.ITEM.get(key);
+            return BuiltInRegistries.ITEM.getValue(key);
         } catch (Throwable t) {
             return null;
         }
@@ -668,6 +668,9 @@ public final class GuiActions {
     }
 
     /** 解析配方的产物（1.21.2+ 走 SlotDisplay）。 */
+    /**
+     * 解析配方的产物（反射兼容各版本的 SlotDisplay API 差异）。
+     */
     private static ItemStack resultOf(CraftingRecipe recipe,
                                       net.minecraft.util.context.ContextMap ctx) {
         try {
@@ -675,10 +678,24 @@ public final class GuiActions {
             if (displays.isEmpty()) {
                 return ItemStack.EMPTY;
             }
-            return displays.get(0).resolveForFirstStack(ctx);
+            Object first = displays.get(0);
+            for (String mn : new String[]{"resolveForStacks", "resolveForFirstStack"}) {
+                try {
+                    var m = first.getClass().getMethod(mn,
+                            net.minecraft.util.context.ContextMap.class);
+                    Object r = m.invoke(first, ctx);
+                    if (r instanceof java.util.List<?> l && !l.isEmpty()) {
+                        return (ItemStack) l.get(0);
+                    }
+                    if (r instanceof ItemStack st) {
+                        return st;
+                    }
+                    break;
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+            return ItemStack.EMPTY;
         } catch (Throwable t) {
             return ItemStack.EMPTY;
         }
     }
-
-}

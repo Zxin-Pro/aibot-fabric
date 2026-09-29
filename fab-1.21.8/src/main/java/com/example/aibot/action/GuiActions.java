@@ -576,7 +576,7 @@ public final class GuiActions {
             if (!(holder.value() instanceof CraftingRecipe cr)) {
                 continue;
             }
-            ItemStack result = resultOf(holder.value(), ctx);
+            ItemStack result = resultOf(cr, ctx);
             if (result.isEmpty() || !result.is(target)) {
                 continue;
             }

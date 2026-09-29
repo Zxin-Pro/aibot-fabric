@@ -592,7 +592,7 @@ public class ActionExecutor {
         if (key == null) {
             return null;
         }
-        Block b = BuiltInRegistries.BLOCK.get(key);
+        Block b = BuiltInRegistries.BLOCK.getValue(key);
         return b == null || b == Blocks.AIR ? null : b;
     }
 

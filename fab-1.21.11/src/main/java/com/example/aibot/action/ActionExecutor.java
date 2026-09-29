@@ -498,7 +498,7 @@ public class ActionExecutor {
         try {
             var result = bot.startSleepInBed(bedPos);
             if (result.left().isPresent()) {
-                return ActionResult.fail("无法入睡：" + result.left().get().name());
+                return ActionResult.fail("无法入睡：" + result.left().get().message().getString());
             }
             return ActionResult.ok("已上床睡觉");
         } catch (Throwable t) {
@@ -592,7 +592,7 @@ public class ActionExecutor {
         if (key == null) {
             return null;
         }
-        Block b = BuiltInRegistries.BLOCK.get(key);
+        Block b = BuiltInRegistries.BLOCK.getValue(key);
         return b == null || b == Blocks.AIR ? null : b;
     }
 
