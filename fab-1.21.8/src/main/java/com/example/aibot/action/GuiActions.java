@@ -656,9 +656,13 @@ public final class GuiActions {
     private static List<net.minecraft.world.item.crafting.Ingredient> ingredientsOf(CraftingRecipe recipe) {
         try {
             if (recipe instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
-                return shaped.getIngredients();
+                List<net.minecraft.world.item.crafting.Ingredient> out = new java.util.ArrayList<>();
+                for (var opt : shaped.getIngredients()) {
+                    // 1.21.2+ 返回 Optional 包装，空表示该格不放东西
+                    out.add(opt.orElse(null));
+                }
+                return out;
             }
-            // 无序配方：从 SlotDisplay 反推（拿不到时返回空表，由调用方报「材料不足」）
             return java.util.Collections.emptyList();
         } catch (Throwable t) {
             return java.util.Collections.emptyList();

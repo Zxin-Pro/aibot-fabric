@@ -699,3 +699,4 @@ public final class GuiActions {
             return ItemStack.EMPTY;
         }
     }
+}
