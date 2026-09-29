@@ -22,10 +22,10 @@ processResources {
     }
 }
 
-// 26.1.2 目标 Java 21（26.2 起才要求 25）。
+// 26.1.2 目标 Java 25（实测编译期报 class file version 69 要求，即 Java 25）。
 java {
     withSourcesJar()
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
