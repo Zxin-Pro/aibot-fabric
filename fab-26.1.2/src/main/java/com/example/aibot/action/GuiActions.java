@@ -648,8 +648,13 @@ public final class GuiActions {
     /** 取配方所需材料（1.21.2+ 的 getIngredients 只在有序配方上）。 */
     private static List<net.minecraft.world.item.crafting.Ingredient> ingredientsOf(CraftingRecipe recipe) {
         try {
+            // 1.21.2+ 返回 List<Optional<Ingredient>>：空 Optional 表示该格不放东西
             if (recipe instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
-                return shaped.getIngredients();
+                List<net.minecraft.world.item.crafting.Ingredient> out = new java.util.ArrayList<>();
+                for (var opt : shaped.getIngredients()) {
+                    out.add(opt.orElse(net.minecraft.world.item.crafting.Ingredient.EMPTY));
+                }
+                return out;
             }
             return java.util.Collections.emptyList();
         } catch (Throwable t) {

@@ -647,14 +647,16 @@ public final class GuiActions {
         return true;
     }
 
-    /** 取配方所需材料（1.21.2+ 的 getIngredients 只在有序配方上）。 */
-    @SuppressWarnings("unchecked")
+    /** 取配方所需材料（1.21.2+ 的 getIngredients 只在有序配方上，且返回 Optional 包装）。 */
     private static List<net.minecraft.world.item.crafting.Ingredient> ingredientsOf(CraftingRecipe recipe) {
         try {
             if (recipe instanceof net.minecraft.world.item.crafting.ShapedRecipe shaped) {
-                return shaped.getIngredients();
+                List<net.minecraft.world.item.crafting.Ingredient> out = new java.util.ArrayList<>();
+                for (var opt : shaped.getIngredients()) {
+                    out.add(opt.orElse(net.minecraft.world.item.crafting.Ingredient.EMPTY));
+                }
+                return out;
             }
-            // 无序配方：从 SlotDisplay 反推（拿不到时返回空表，由调用方报「材料不足」）
             return java.util.Collections.emptyList();
         } catch (Throwable t) {
             return java.util.Collections.emptyList();

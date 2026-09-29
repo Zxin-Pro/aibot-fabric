@@ -89,23 +89,18 @@ public final class ContainerOps {
                              int slot, int button, ClickType type) {
         try {
             // 记录点击前的各槽位内容，作为「变更集」上报（原版协议要求）
-            it.unimi.dsi.fastutil.ints.Int2ObjectMap changed =
-                    new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap();
-            for (int i = 0; i < menu.slots.size(); i++) {
-                Slot s = menu.getSlot(i);
-                if (s != null && s.hasItem()) {
-                    changed.put(i, s.getItem().copy());
-                }
-            }
-
+            // 1.21.8+ 的包构造：(containerId, stateId, slot, button,
+            //                   ClickType, changedSlots<HashedStack>, HashedStack)
+            it.unimi.dsi.fastutil.ints.Int2ObjectMap<net.minecraft.network.HashedStack> changed =
+                    new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>();
             var packet = new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(
                     menu.containerId,
                     menu.getStateId(),
                     (short) slot,
                     (byte) button,
                     type,
-                    menu.getCarried().copy(),
-                    changed);
+                    changed,
+                    net.minecraft.network.HashedStack.fromItemStack(menu.getCarried()));
 
             // 投递给服务端处理 —— 与真人客户端发来的包走同一个方法
             var listener = player.connection;
