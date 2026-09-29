@@ -101,6 +101,12 @@ public class ActionExecutor {
                     return place(parsed);
                 case "craft":
                     return craft(parsed);
+                case "smelt":
+                    return smelt(parsed);
+                case "collect":
+                    return collectFurnace(parsed);
+                case "withdraw":
+                    return withdraw(parsed);
                 case "attack":
                     return attack(parsed);
                 case "flee":
@@ -283,69 +289,69 @@ public class ActionExecutor {
      * 假玩家没有客户端界面。这里在服务端按真实配方规则结算
      * （材料必须齐全、产物按配方数量给），不凭空产出。</p>
      */
+    /**
+     * 合成物品 —— <b>走原版工作台界面</b>，与真人逐操作等价。
+     *
+     * <p>实现委托给 {@link GuiActions#craft}，它会：</p>
+     * <ol>
+     *   <li>判断配方是否需要工作台（2x2 的直接用背包界面，真人也是如此）</li>
+     *   <li>需要工作台但附近没有 → 先合成一个并放下（同样走界面）</li>
+     *   <li>走到工作台旁 → 右键打开界面</li>
+     *   <li>按配方逐格摆放材料（真人：拿整摞 → 右键放一个 → 放回剩余）</li>
+     *   <li>shift 点击成品格取出，最后把网格剩余材料收回</li>
+     * </ol>
+     *
+     * <p><b>为什么要这么麻烦</b>：旧实现是「查配方 → 直接往背包塞成品」，
+     * 等于开了个隐形工作台。结果一样，但过程与真人完全不同。
+     * 现在每一步都经过原版 {@code AbstractContainerMenu.doClick} 的校验，
+     * 任何容器相关插件看到的轨迹都与真人一致。</p>
+     */
     protected ActionResult craft(ActionParser.ParsedAction parsed) {
         String itemId = parsed.getString("item", "");
         int count = Math.max(1, Math.min(parsed.getInt("count", 1), 64));
         if (itemId.isEmpty()) {
             return ActionResult.fail("craft 动作缺少 item 参数");
         }
-
-        String full = itemId.contains(":") ? itemId : "minecraft:" + itemId;
-        ResourceLocation key = ResourceLocation.tryParse(full);
-        if (key == null) {
-            return ActionResult.fail("非法物品 ID: " + itemId);
-        }
-        net.minecraft.world.item.Item targetItem = BuiltInRegistries.ITEM.get(key);
-        if (targetItem == null || targetItem == Items.AIR) {
-            return ActionResult.fail("未知物品: " + itemId);
-        }
-
-        ServerLevel level = bot.serverLevel();
-        var recipes = level.getServer().getRecipeManager();
-        // 1.21.1 没有 RecipeDisplay 体系
-
-        net.minecraft.world.item.crafting.RecipeHolder<?> matchedRecipe = null;
-        ItemStack matchedResult = ItemStack.EMPTY;
-        boolean recipeExists = false;
-
-        for (var holder : recipes.getRecipes()) {
-            ItemStack result = holder.value().getResultItem(level.registryAccess());
-            if (result.isEmpty() || !result.is(targetItem)) {
-                continue;
-            }
-            recipeExists = true;
-            if (hasIngredients(holder.value())) {
-                matchedRecipe = holder;
-                matchedResult = result;
-                break;
-            }
-        }
-
-        if (matchedRecipe == null || matchedResult.isEmpty()) {
-            return ActionResult.fail(recipeExists
-                    ? "材料不足，无法合成 " + shortId(full)
-                    : "找不到合成 " + shortId(full) + " 的配方");
-        }
-
-        consumeIngredients(matchedRecipe.value());
-
-        int perCraft = Math.max(1, matchedResult.getCount());
-        int total = perCraft * count;
-        while (total > 0) {
-            int batch = Math.min(perCraft, total);
-            ItemStack out = matchedResult.copy();
-            out.setCount(batch);
-            if (!bot.getInventory().add(out)) {
-                bot.drop(out, false);
-            }
-            total -= batch;
-        }
-
-        return ActionResult.ok("合成了 " + count + " 份 " + shortId(full)
-                + "（共 " + (perCraft * count) + " 个）");
+        return gui().craft(itemId, count);
     }
 
-    
+    /**
+     * 熔炼 —— 走原版熔炉界面（放料 → 等 → 取成品），与真人一致。
+     *
+     * <p>参数：item（要烧的物品）、count（数量）、fuel（燃料，可选）。</p>
+     */
+    protected ActionResult smelt(ActionParser.ParsedAction parsed) {
+        String itemId = parsed.getString("item", "");
+        int count = Math.max(1, Math.min(parsed.getInt("count", 1), 64));
+        String fuel = parsed.getString("fuel", "");
+        if (itemId.isEmpty()) {
+            return ActionResult.fail("smelt 动作缺少 item 参数");
+        }
+        return gui().smelt(itemId, count, fuel);
+    }
+
+    /** 从熔炉取出成品（真人：开熔炉 → 点成品格拿走）。 */
+    protected ActionResult collectFurnace(ActionParser.ParsedAction parsed) {
+        return gui().collectFurnace();
+    }
+
+    /** 从箱子取出物品（真人：走到箱子 → 开界面 → shift 点击）。 */
+    protected ActionResult withdraw(ActionParser.ParsedAction parsed) {
+        String itemId = parsed.getString("item", "");
+        int count = Math.max(0, parsed.getInt("count", 0));
+        return gui().withdraw(itemId, count);
+    }
+
+    /** 懒建 GUI 动作执行器（它需要 driver 引用）。 */
+    private GuiActions guiRef;
+
+    private GuiActions gui() {
+        if (guiRef == null) {
+            guiRef = new GuiActions(bot, config, this, driver);
+        }
+        return guiRef;
+    }
+
     protected boolean hasIngredients(net.minecraft.world.item.crafting.Recipe<?> recipe) {
         try {
             var ingredients = recipe.getIngredients();
@@ -558,109 +564,6 @@ public class ActionExecutor {
         }
         return ActionResult.fail("找不到玩家 " + playerName);
     }
-
-    /**
-     * 存放物品到容器。
-     *
-     * <p>真人也是打开箱子再放，这里直接与容器交互（服务端等价操作）。</p>
-     */
-    protected ActionResult store(ActionParser.ParsedAction parsed) {
-        String wanted = parsed.getString("item", "");
-        ServerLevel level = bot.serverLevel();
-
-        net.minecraft.world.Container container = findNearestContainer(level, 6);
-        if (container == null) {
-            return ActionResult.fail("附近 6 格内没有可用的容器（箱子/桶）");
-        }
-
-        var inv = bot.getInventory();
-        int movedCount = 0;
-        int movedKinds = 0;
-
-        // 跳过快捷栏前 9 格，避免把正在用的工具存走
-        for (int i = 9; i < inv.getContainerSize(); i++) {
-            ItemStack stack = inv.getItem(i);
-            if (stack.isEmpty()) {
-                continue;
-            }
-            if (!wanted.isEmpty()) {
-                ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
-                if (key == null || (!key.toString().equals(wanted)
-                        && !key.toString().equals("minecraft:" + wanted))) {
-                    continue;
-                }
-            }
-            int before = stack.getCount();
-            ItemStack remaining = insertIntoContainer(container, stack);
-            int moved = before - remaining.getCount();
-            if (moved > 0) {
-                movedCount += moved;
-                movedKinds++;
-                inv.setItem(i, remaining);
-            }
-        }
-
-        if (movedCount == 0) {
-            return ActionResult.fail(wanted.isEmpty()
-                    ? "容器已满或没有可存入的物品"
-                    : "没有可存入的 " + shortId(wanted));
-        }
-        container.setChanged();
-        return ActionResult.ok("存入 " + movedKinds + " 种物品，共 " + movedCount + " 个");
-    }
-
-    protected ItemStack insertIntoContainer(net.minecraft.world.Container container, ItemStack stack) {
-        for (int i = 0; i < container.getContainerSize() && !stack.isEmpty(); i++) {
-            ItemStack slot = container.getItem(i);
-            if (slot.isEmpty()) {
-                container.setItem(i, stack.copy());
-                return ItemStack.EMPTY;
-            }
-            if (ItemStack.isSameItemSameComponents(slot, stack)) {
-                int max = Math.min(container.getMaxStackSize(), slot.getMaxStackSize());
-                int space = max - slot.getCount();
-                if (space > 0) {
-                    int move = Math.min(space, stack.getCount());
-                    slot.grow(move);
-                    stack.shrink(move);
-                    container.setItem(i, slot);
-                }
-            }
-        }
-        return stack;
-    }
-
-    // ------------------------------------------------------------------
-    // 工具方法
-    // ------------------------------------------------------------------
-
-    /** 找最近的实现了 Container 的方块实体。 */
-    protected net.minecraft.world.Container findNearestContainer(ServerLevel level, int radius) {
-        BlockPos center = bot.blockPosition();
-        net.minecraft.world.Container best = null;
-        double bestDist = Double.MAX_VALUE;
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dy = -4; dy <= 4; dy++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    BlockPos pos = center.offset(dx, dy, dz);
-                    if (!level.isLoaded(pos)) {
-                        continue;
-                    }
-                    var be = level.getBlockEntity(pos);
-                    if (be instanceof net.minecraft.world.Container c) {
-                        double d = center.distSqr(pos);
-                        if (d < bestDist) {
-                            bestDist = d;
-                            best = c;
-                        }
-                    }
-                }
-            }
-        }
-        return best;
-    }
-
-    /** 在半径内寻找最近的某类方块。 */
     protected BlockPos findNearestBlockOfType(ServerLevel level, Class<?> blockClass, int radius) {
         BlockPos center = bot.blockPosition();
         BlockPos best = null;

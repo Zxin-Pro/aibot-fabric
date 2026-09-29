@@ -777,33 +777,127 @@ public final class TickActionDriver {
      * 选择挖这个方块最合适的工具，并切到手上。
      *
      * <p>真人挖矿会先换工具：石头用镐、木头用斧、土用锹。
-     * 这里模仿同样的行为；找不到合适工具就空手挖（会慢很多）。</p>
+     * 这里模仿<b>完整的真人流程</b>：</p>
+     * <ol>
+     *   <li>先在快捷栏 0-8 里找 —— 真人优先用快捷栏，因为按个数字键就行</li>
+     *   <li>快捷栏没有合适工具 → <b>打开背包，把工具从背包拖到快捷栏</b>
+     *       （原版 InventoryMenu 的点击序列，与真人拖拽等价）</li>
+     *   <li>背包里也没有 → 空手挖（会慢很多，与真人一样）</li>
+     * </ol>
+     *
+     * <p>旧实现只看快捷栏，导致工具放在背包第 20 格时它宁愿空手慢慢挖 ——
+     * 这一点与真人明显不符，本版已修正。</p>
      */
     private void selectBestToolFor(BlockState state) {
         var inv = bot.getInventory();
 
-        // 先用原版的「工具对当前方块是否更快」来判断，最通用
+        // ---- 第 1 步：快捷栏里找 ----
         int bestSlot = -1;
         float bestSpeed = 1.0f;
-
-        for (int i = 0; i < 9; i++) { // 只看快捷栏，真人也是切快捷栏
-            ItemStack s = inv.getItem(i);
-            if (s.isEmpty()) {
-                continue;
-            }
-            try {
-                float speed = s.getDestroySpeed(state);
-                if (speed > bestSpeed) {
-                    bestSpeed = speed;
-                    bestSlot = i;
-                }
-            } catch (Throwable ignored) {
-                // 某些版本/物品不支持，忽略
+        for (int i = 0; i < 9; i++) {
+            float speed = speedOf(inv.getItem(i), state);
+            if (speed > bestSpeed) {
+                bestSpeed = speed;
+                bestSlot = i;
             }
         }
-
         if (bestSlot >= 0) {
             inv.selected = bestSlot;
+            return;
+        }
+
+        // ---- 第 2 步：背包里找，然后像真人一样拖到快捷栏 ----
+        int invSlot = -1;
+        float invBest = 1.0f;
+        for (int i = 9; i < inv.getContainerSize(); i++) {
+            float speed = speedOf(inv.getItem(i), state);
+            if (speed > invBest) {
+                invBest = speed;
+                invSlot = i;
+            }
+        }
+        if (invSlot < 0) {
+            return;   // 背包里也没有：空手挖，与真人一致
+        }
+
+        // 找一个空的快捷栏格子放
+        int emptyHotbar = -1;
+        for (int i = 0; i < 9; i++) {
+            if (inv.getItem(i).isEmpty()) {
+                emptyHotbar = i;
+                break;
+            }
+        }
+        if (emptyHotbar < 0) {
+            // 快捷栏满了：真人会把手上的换下来。这里换到 0 号位。
+            emptyHotbar = 0;
+        }
+
+        // 走原版背包界面完成移动（等价于真人打开背包拖拽）
+        if (moveBetweenInventorySlots(invSlot, emptyHotbar)) {
+            inv.selected = emptyHotbar;
+        } else {
+            // 界面操作失败（例如其他插件占用）：退化为直接切换，
+            // 保证功能不中断 —— 但这属于非常规路径，正常不会触发。
+            try {
+                ItemStack tmp = inv.getItem(emptyHotbar).copy();
+                inv.setItem(emptyHotbar, inv.getItem(invSlot).copy());
+                inv.setItem(invSlot, tmp);
+                inv.selected = emptyHotbar;
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 取物品对某方块的挖掘速度（拿不到时返回 1，即空手速度）。 */
+    private float speedOf(ItemStack s, BlockState state) {
+        if (s == null || s.isEmpty()) {
+            return 1.0f;
+        }
+        try {
+            return s.getDestroySpeed(state);
+        } catch (Throwable t) {
+            return 1.0f;
+        }
+    }
+
+    /**
+     * 通过原版背包界面在「背包槽位 → 快捷栏槽位」之间移动物品。
+     *
+     * <p>真人做法：按 E 打开背包 → 把物品拖到快捷栏那一行 → 按 E 关闭。
+     * 这里用 {@code InventoryMenu} 上的 doClick 序列实现同样的效果。</p>
+     *
+     * @param fromSlot 背包槽位编号（Inventory 内部编号，9-35）
+     * @param toSlot   快捷栏槽位编号（Inventory 内部编号，0-8）
+     * @return 是否成功
+     */
+    private boolean moveBetweenInventorySlots(int fromSlot, int toSlot) {
+        try {
+            var menu = bot.inventoryMenu;
+            // InventoryMenu 的玩家背包槽位映射：
+            //   menu 槽位 9..35  -> Inventory 槽位 9..35（主背包）
+            //   menu 槽位 36..44 -> Inventory 槽位 0..8（快捷栏）
+            // 因此需要做一次编号转换。
+            int menuFrom = fromSlot >= 9 ? fromSlot : (fromSlot + 36);
+            int menuTo = toSlot >= 9 ? toSlot : (toSlot + 36);
+
+            if (menuFrom >= menu.slots.size() || menuTo >= menu.slots.size()) {
+                return false;
+            }
+            if (menu.getSlot(menuFrom).getItem().isEmpty()) {
+                return false;
+            }
+
+            // 真人拖拽 = 左键拿起 → 左键放下（或右键逐个放）
+            menu.doClick(menuFrom, 0, net.minecraft.world.inventory.ClickType.PICKUP, bot);
+            menu.doClick(menuTo, 0, net.minecraft.world.inventory.ClickType.PICKUP, bot);
+            menu.broadcastChanges();
+
+            // 正常情况下光标物品已交换过去、目标格有东西了
+            return !menu.getSlot(menuTo).getItem().isEmpty();
+        } catch (Throwable t) {
+            LOGGER.log(Level.FINE, "[AIBot] 背包内移动物品失败", t);
+            return false;
         }
     }
 
